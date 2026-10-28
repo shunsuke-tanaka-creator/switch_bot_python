@@ -1,0 +1,4 @@
+-r requirements.txt
+# Install CUDA-enabled PyTorch separately on Ubuntu (see docs/research.md).
+torch>=2.6,<3
+sentence-transformers>=3,<6

@@ -1,0 +1,8 @@
+{
+  "host": "YOUR_UBUNTU_TAILSCALE_IP", "port": 8000,
+  "participant_id": "p001", "ble_enabled": false,
+  "allowed_clients": ["127.0.0.1", "::1", "YOUR_MAC_TAILSCALE_IP", "YOUR_IPHONE_TAILSCALE_IP"],
+  "database": "data/lifelog.sqlite3", "research_enabled": true,
+  "research_require_cuda": true, "research_epochs": 20,
+  "research_models": "data/models", "text_model": "/opt/models/multilingual-sentence-model"
+}

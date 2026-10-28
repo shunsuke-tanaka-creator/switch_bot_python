@@ -5,3 +5,7 @@ data/
 server-config.json
 *.log
 .DS_Store
+*.pt
+*.npz
+*export*.json
+*export*.jsonl

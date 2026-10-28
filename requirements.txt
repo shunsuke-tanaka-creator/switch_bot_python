@@ -3,3 +3,4 @@ uvicorn>=0.34,<1
 bleak>=1.0,<4
 httpx>=0.28,<1
 pytest>=8,<10
+numpy>=2,<3
