@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>生活の気づき</title>
+    <style>
+      body {
+        font: 16px/1.7 system-ui;
+        background: #f2f6f4;
+        color: #183c36;
+        margin: 0;
+      }
+      main {
+        max-width: 1000px;
+        margin: auto;
+        padding: 20px;
+      }
+      section {
+        background: white;
+        border-radius: 14px;
+        padding: 20px;
+        margin: 18px 0;
+      }
+      h1 {
+        font-size: 26px;
+      }
+      h2 {
+        font-size: 20px;
+      }
+      button {
+        font: inherit;
+        border: 1px solid #b0ccc3;
+        border-radius: 9px;
+        padding: 10px 14px;
+        margin: 5px;
+        background: #edf7f2;
+        color: #164e43;
+      }
+      button:focus-visible {
+        outline: 3px solid #1a7863;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      td,
+      th {
+        padding: 9px;
+        text-align: left;
+        border-bottom: 1px solid #d8e8e2;
+      }
+      .scroll {
+        overflow: auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+        gap: 14px;
+      }
+      small,
+      .muted {
+        color: #536b65;
+      }
+      svg {
+        width: 100%;
+        height: 320px;
+      }
+      label {
+        display: inline-block;
+        margin: 8px;
+      }
+      input {
+        font: inherit;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      a {
+        color: #06654f;
+      }
+      .notice {
+        padding: 12px;
+        background: #e7f3ed;
+        border-radius: 8px;
+      }
+      #error {
+        color: #a62828;
+      }
+      dialog {
+        max-width: 520px;
+        border: 1px solid #789f8b;
+        border-radius: 12px;
+      }
+      dialog button {
+        display: block;
+      }
+      circle {
+        fill: #d4ede1;
+        stroke: #29775e;
+      }
+      text {
+        fill: #173d34;
+        font-size: 12px;
+      }
+      line {
+        stroke: #91b5a4;
+        stroke-width: 2;
+      }
+      @media (max-width: 500px) {
+        main {
+          padding: 12px;
+        }
+        section {
+          padding: 16px;
+        }
+        svg {
+          height: 260px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>生活の気づき</h1>
+      <p>気分の回答・観測・三階層LSTMの推定を区別して表示します。</p>
+      <p><a href="/research/__PARTICIPANT__">5尺度の履歴・訂正・学習状況</a></p>
+      <p id="error" role="status"></p>
+      <section>
+        <h2>今のお天気分</h2>
+        <div id="weatherButtons"></div>
+        <p id="saved" role="status"></p>
+        <p><small>4種類の気分です。疲労の1〜5点には変換しません。</small></p>
+        <div id="weatherHistory"></div>
+      </section>
+      <section>
+        <h2>質問と提案</h2>
+        <button id="answer">今の質問に回答</button
+        ><button id="refresh">更新</button>
+        <div>
+          <label><input id="questions" type="checkbox" />自動質問</label
+          ><label
+            ><input id="interventions" type="checkbox" />休憩などの提案</label
+          >
+        </div>
+        <p id="budget"></p>
+        <p class="muted">
+          短い休憩・軽い気分転換・作業の切り替えを提案します。実行と役立ち度は別に確認します。
+        </p>
+      </section>
+      <section>
+        <h2>疲労と入力の変化</h2>
+        <div class="grid">
+          <div>
+            <h3>疲労の推定と普段との差</h3>
+            <p id="fatigue"></p>
+          </div>
+          <div>
+            <h3>入力修正の観測</h3>
+            <p id="typing"></p>
+          </div>
+        </div>
+      </section>
+      <section>
+        <h2>曜日 × 時間帯の疲労傾向</h2>
+        <p>
+          本人の回答を日単位で集約し、同じ活動内で比較します。十分な週数と日数がない場合は表示しません。
+        </p>
+        <div class="scroll"><table id="trends"></table></div>
+      </section>
+      <section>
+        <h2>名前のない場所クラス</h2>
+        <p id="placeSummary"></p>
+        <p id="destination"></p>
+        <svg id="places" role="img" aria-label="場所と移動のトポロジー"></svg>
+        <div class="scroll"><table id="placeRows"></table></div>
+        <p class="muted">
+          予測した行き先と、観測した到着先は別です。位置を取れない時間帯を不在と扱いません。
+        </p>
+      </section>
+      <section>
+        <h2>自動で増える生活パターン</h2>
+        <p id="patternSummary"></p>
+        <svg id="patterns" role="img" aria-label="生活パターンの遷移"></svg>
+        <div class="scroll"><table id="patternRows"></table></div>
+        <p>
+          3日以上に現れたノードは定着、それ以前は新出として表示します。本人の承認は不要です。
+        </p>
+      </section>
+      <dialog id="question">
+        <h2 id="prompt"></h2>
+        <div id="options"></div>
+        <button id="defer">あとで</button>
+      </dialog>
+    </main>
+    <script>
+      const participant = "__PARTICIPANT__",
+        api = "/api/research/" + participant,
+        $ = (id) => document.getElementById(id),
+        ns = "http://www.w3.org/2000/svg";
+      const weather = {
+        happy: "☀️ 晴れ・うれしい",
+        normal: "☁️ くもり・ふつう",
+        sad: "🌧️ 雨・悲しい",
+        angry: "⛈️ 雷・いらだち",
+      };
+      const names = ["気分", "疲労", "ストレス", "集中度", "眠気"],
+        keys = ["mood", "fatigue", "stress", "concentration", "sleepiness"];
+      let pending = null,
+        scale = 0,
+        scores = {},
+        snapshot = null;
+      async function request(path, body) {
+        const r = await fetch(
+          path,
+          body
+            ? {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              }
+            : {},
+        );
+        if (r.status === 204) return null;
+        if (!r.ok) throw Error("通信・保存エラー " + r.status);
+        return r.json();
+      }
+      const uid = () =>
+        crypto.randomUUID
+          ? crypto.randomUUID()
+          : Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
+      const emit = (kind, payload) =>
+        request(api + "/events", {
+          schema_version: "research-v2",
+          event_id: uid(),
+          participant_id: participant,
+          occurred_at: new Date().toISOString(),
+          kind,
+          payload,
+        });
+      function row(table, values, head = false) {
+        const tr = document.createElement("tr");
+        for (const v of values) {
+          const td = document.createElement(head ? "th" : "td");
+          td.textContent = String(v);
+          tr.append(td);
+        }
+        table.append(tr);
+      }
+      function graph(id, data, prefix) {
+        const svg = $(id);
+        svg.replaceChildren();
+        const width = Math.max(260, svg.getBoundingClientRect().width),
+          cols = Math.max(1, Math.floor(width / 95)),
+          nodes = data.nodes.slice(-30),
+          height = Math.max(130, Math.ceil(nodes.length / cols) * 95 + 30),
+          positions = new Map();
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.style.height = height + "px";
+        nodes.forEach((n, i) =>
+          positions.set(n.id, [
+            (((i % cols) + 0.5) * width) / cols,
+            40 + Math.floor(i / cols) * 95,
+          ]),
+        );
+        for (const e of data.edges) {
+          if (!positions.has(e.source) || !positions.has(e.target)) continue;
+          const [x, y] = positions.get(e.source),
+            [u, v] = positions.get(e.target),
+            line = document.createElementNS(ns, "line");
+          for (const [k, vv] of Object.entries({ x1: x, y1: y, x2: u, y2: v }))
+            line.setAttribute(k, vv);
+          svg.append(line);
+        }
+        nodes.forEach((n, i) => {
+          const [x, y] = positions.get(n.id),
+            g = document.createElementNS(ns, "g"),
+            c = document.createElementNS(ns, "circle"),
+            t = document.createElementNS(ns, "text"),
+            title = document.createElementNS(ns, "title");
+          c.setAttribute("cx", x);
+          c.setAttribute("cy", y);
+          c.setAttribute("r", 18);
+          t.setAttribute("x", x);
+          t.setAttribute("y", y + 35);
+          t.setAttribute("text-anchor", "middle");
+          t.textContent = prefix + (data.nodes.length - nodes.length + i + 1);
+          title.textContent = t.textContent + " / " + n.count + "件";
+          g.append(title, c, t);
+          svg.append(g);
+        });
+      }
+      async function refresh() {
+        try {
+          const d = await request(api + "/insights");
+          snapshot = d;
+          $("error").textContent = "";
+          const f = d.fatigue,
+            t = d.typing;
+          $("fatigue").textContent =
+            f.status === "available"
+              ? `推定 ${f.value.toFixed(1)} / 普段 ${f.expected.toFixed(1)} / 差 ${f.difference.toFixed(1)}点。${f.acute ? "継続する上昇候補。" : ""}${f.high ? "疲労は高めです。" : ""}`
+              : "推定・比較に必要な回答または観測が不足しています。";
+          $("typing").textContent =
+            t.status === "available"
+              ? `修正頻度 ${(100 * t.correction_rate).toFixed(1)}% / 基準上限 ${(100 * t.threshold).toFixed(1)}%。${t.unusual ? "修正が増えています。" : "継続した増加の条件は満たしていません。"}`
+              : "同じ入力方式の比較用データが不足しています。";
+          $("weatherHistory").textContent = d.weather
+            .slice(-12)
+            .map(
+              (x) =>
+                new Date(x.at).toLocaleString("ja-JP") +
+                " " +
+                weather[x.weather],
+            )
+            .join(" ／ ");
+          $("questions").checked = d.preferences.questions_enabled;
+          $("interventions").checked = d.preferences.interventions_enabled;
+          $("budget").textContent =
+            `質問は1日${d.preferences.daily_limit}回、うち提案${d.preferences.intervention_limit}回まで。間隔${d.preferences.gap_minutes}分。`;
+          $("trends").replaceChildren();
+          row(
+            $("trends"),
+            ["曜日・時間帯", "差（1〜5点）", "補正区間", "比較日数", "状態"],
+            true,
+          );
+          for (const x of d.trends)
+            row($("trends"), [
+              ["月", "火", "水", "木", "金", "土", "日"][x.weekday] +
+                " " +
+                {
+                  morning: "午前",
+                  afternoon: "午後",
+                  evening: "夕方",
+                  night: "夜",
+                }[x.period],
+              x.difference.toFixed(2),
+              x.interval.map((v) => v.toFixed(2)).join("〜"),
+              x.target_days + " / " + x.reference_days,
+              { higher: "高め", lower: "低め", uncertain: "傾向不明" }[
+                x.status
+              ],
+            ]);
+          if (!d.trends.length)
+            row($("trends"), [
+              "データ不足：6週間以上の観測と条件ごとの回答が必要です",
+            ]);
+          for (const [type, id, prefix] of [
+            ["places", "placeRows", "場所"],
+            ["patterns", "patternRows", "生活"],
+          ]) {
+            const data = d[type];
+            graph(type, data, prefix);
+            $(id).replaceChildren();
+            row($(id), ["クラス", "件数", "日数"], true);
+            data.nodes.forEach((n, i) =>
+              row($(id), [
+                prefix + (i + 1) + (n.status === "emerging" ? "（新出）" : ""),
+                n.count,
+                n.days,
+              ]),
+            );
+          }
+          $("placeSummary").textContent =
+            `場所${d.places.nodes.length}クラス・移動${d.places.edges.length}接続。`;
+          $("patternSummary").textContent =
+            `生活${d.patterns.nodes.length}クラス・遷移${d.patterns.edges.length}接続。` +
+            (d.patterns.nodes.length > 30
+              ? "図は直近30クラス、表は全クラスを表示。"
+              : "") +
+            (d.patterns.at_capacity ? "上限に達しています。" : "");
+          const dest = d.places.destination;
+          $("destination").textContent =
+            dest.status === "predicted"
+              ? "次の行き先候補（未観測）：" +
+                dest.places
+                  .map(
+                    (x) =>
+                      "場所" +
+                      (d.places.nodes.findIndex((n) => n.id === x.place_id) +
+                        1) +
+                      " " +
+                      (100 * x.probability).toFixed(0) +
+                      "%",
+                  )
+                  .join(" ／ ")
+              : "行き先の予測には移動履歴が不足しています。";
+        } catch (e) {
+          $("error").textContent = e.message;
+        }
+      }
+      for (const [value, label] of Object.entries(weather)) {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.onclick = async () => {
+          try {
+            await emit("weather_mood", { weather: value });
+            $("saved").textContent = "保存しました";
+            refresh();
+          } catch (e) {
+            $("error").textContent = e.message;
+          }
+        };
+        $("weatherButtons").append(b);
+      }
+      for (const [id, key] of [
+        ["questions", "questions_enabled"],
+        ["interventions", "interventions_enabled"],
+      ])
+        $(id).onchange = () =>
+          emit("preferences", { [key]: $(id).checked })
+            .then(refresh)
+            .catch((e) => ($("error").textContent = e.message));
+      function options(prompt, choices, handler) {
+        $("prompt").textContent = prompt;
+        $("options").replaceChildren();
+        for (const o of choices) {
+          const b = document.createElement("button");
+          b.textContent = o.label;
+          b.onclick = () => handler(o.value);
+          $("options").append(b);
+        }
+      }
+      async function save(value, text = null) {
+        try {
+          if (pending.kind === "weatherMood")
+            await emit("weather_mood", {
+              weather: value,
+              question_id: pending.id,
+            });
+          if (pending.kind === "typingReason")
+            await emit("typing_reason", {
+              reason: value,
+              question_id: pending.id,
+            });
+          if (pending.kind === "supportOutcome") {
+            const parts = value.split(":");
+            await emit("intervention_outcome", {
+              question_id: pending.relatedID,
+              action: parts[1],
+              executed: parts[2] !== "not_executed",
+              helpfulness: parts[2] === "not_executed" ? "unknown" : parts[2],
+            });
+          }
+          if (value === "stop" || value === "declined")
+            await emit("question_state", {
+              question_id: pending.id,
+              state: value,
+            });
+          await request("/api/narrative-events", {
+            event_id: pending.id,
+            participant_id: participant,
+            source: "research_dashboard",
+            event_type: pending.eventType,
+            detected_at: pending.detectedAt,
+            question_shown_at: pending.questionShownAt,
+            answered_at: new Date().toISOString(),
+            question: { kind: pending.kind, prompt: pending.prompt },
+            answer: { label: value, free_text: text },
+          });
+          typeof $("question").close === "function"
+            ? $("question").close()
+            : $("question").removeAttribute("open");
+          refresh();
+        } catch (e) {
+          $("error").textContent = e.message;
+        }
+      }
+      function showScale() {
+        options(
+          (pending.kind === "currentState" ? "今" : "今日全体") +
+            "の" +
+            names[scale] +
+            "は？",
+          Array.from({ length: 5 }, (_, i) => ({
+            label: String(i + 1),
+            value: String(i + 1),
+          })).concat([{ label: "この項目をスキップ", value: "skip" }]),
+          (v) => {
+            if (v !== "skip") scores[keys[scale]] = Number(v);
+            scale++;
+            if (scale < 5) showScale();
+            else
+              save(
+                pending.kind === "currentState"
+                  ? "current_state"
+                  : "daily_reflection",
+                JSON.stringify(scores),
+              );
+          },
+        );
+      }
+      $("answer").onclick = async () => {
+        try {
+          pending = await request("/api/questions/pending/" + participant);
+          if (!pending) {
+            $("saved").textContent = "今の質問はありません";
+            return;
+          }
+          pending.questionShownAt = new Date().toISOString();
+          await emit("question_state", {
+            question_id: pending.id,
+            state: "shown",
+          });
+          options(pending.prompt, pending.options, (v) => {
+            if (["currentState", "nightReflection"].includes(pending.kind)) {
+              scale = 0;
+              scores = {};
+              showScale();
+            } else save(v);
+          });
+          typeof $("question").showModal === "function"
+            ? $("question").showModal()
+            : $("question").setAttribute("open", "");
+        } catch (e) {
+          $("error").textContent = e.message;
+        }
+      };
+      $("defer").onclick = async () => {
+        try {
+          await emit("question_state", {
+            question_id: pending.id,
+            state: "deferred",
+          });
+          typeof $("question").close === "function"
+            ? $("question").close()
+            : $("question").removeAttribute("open");
+        } catch (e) {
+          $("error").textContent = e.message;
+        }
+      };
+      $("question").addEventListener("cancel", (e) => {
+        e.preventDefault();
+        $("defer").click();
+      });
+      let resizeTimer;
+      window.addEventListener("resize", () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          if (snapshot) {
+            graph("places", snapshot.places, "場所");
+            graph("patterns", snapshot.patterns, "生活");
+          }
+        }, 150);
+      });
+      $("refresh").onclick = refresh;
+      refresh();
+      setInterval(refresh, 60000);
+    </script>
+  </body>
+</html>

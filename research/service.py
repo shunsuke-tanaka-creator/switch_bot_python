@@ -14,6 +14,9 @@ from fastapi import HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from .data import SCALES, ACTIVITIES, Timeline, dt, monday
+from .events import ResearchEvent
+from .insights import InsightEngine
+from .questions import QuestionQueue, settings as question_settings
 
 
 def utc(): return datetime.now(timezone.utc)
@@ -96,6 +99,8 @@ class Engine:
     def __init__(self,store,config):
         self.store=store;self.config=config
         self.root=Path(config.get('research_models','data/models'));self.root.mkdir(parents=True,exist_ok=True)
+        self.insights=InsightEngine(store,config)
+        self.questions=QuestionQueue(store,self.insights)
 
     def rows(self,p):return self.store.rows(p)
     def directory(self,p):return self.root/identifier(p)
@@ -170,7 +175,7 @@ class Engine:
             import torch
             if not torch.cuda.is_available():raise RuntimeError('CUDA unavailable; check the GPU driver and CUDA-enabled PyTorch')
         rows=self.rows(p)
-        count=sum(r['kind'] in ('narrative','correction') for r in rows)
+        count=len(Timeline(rows).labels)
         status=self.status(p)
         if status.get('training_record_count')==count:return dict(status='no_new_labels')
         result=train(rows,self.directory(p),epochs=self.config.get('research_epochs',20),text_model=self.config.get('text_model'))
@@ -182,48 +187,7 @@ class Engine:
         return result
 
     def pending(self,p,at=None):
-        at=dt(at or utc());rows=[r for r in self.rows(p) if dt(r['at'])<=at]
-        heart=next((r['payload'] for r in rows if r['kind']=='heartbeat'),{})
-        if heart.get('questions_enabled') is False:return None
-        kind='nightReflection' if at.hour>=22 else 'currentState'
-        if at.hour<8:return None
-        narrative=[r for r in rows if r['kind']=='narrative' and r['payload'].get('question',{}).get('kind')==kind]
-        if kind=='nightReflection':
-            if any(dt(r['at']).date()==at.date() for r in narrative):return self.rest_question(p,at,rows)
-            bucket=str(at.date());prompt='今日全体の状態を振り返りますか？';value='start_daily_reflection'
-        else:
-            issued=[r for r in rows if r['kind']=='question_issued' and r['payload'].get('kind')==kind]
-            last=max([dt(r['at']) for r in narrative+issued],default=None)
-            if last and (at-last).total_seconds()<10800:
-                recent=next((r['payload'] for r in issued if dt(r['at'])==last),None)
-                if recent and not any(r['id']==recent['id'] for r in narrative):return recent
-                return self.rest_question(p,at,rows)
-            bucket=iso(at);prompt='今の状態（5項目・各5段階）を教えてください';value='start_current_state'
-        q=dict(id=hashlib.sha256(f'{p}:{kind}:{bucket}'.encode()).hexdigest(),participantID=p,kind=kind,prompt=prompt,
-               options=[dict(label='回答を始める',value=value)],allowFreeText=False,eventType='state_assessment',
-               detectedAt=iso(at),questionShownAt=None,snoozeCount=0,
-               context=dict(time_of_day='night' if at.hour>=22 else 'afternoon',typing_active=False,calendar_busy=False,external_trigger='server'))
-        self.store.save('question_issued',q['id'],p,at,q)
-        return q
-
-    def rest_question(self,p,at,rows):
-        if not 8<=at.hour<22:return None
-        feedback=[r for r in rows if r['kind']=='intervention_feedback' or (r['kind']=='narrative' and r['payload'].get('event_type')=='break_suggestion')]
-        feedback=[dict(r,payload=dict(outcome=r['payload'].get('outcome') or r['payload'].get('answer',{}).get('label'))) for r in feedback]
-        if feedback and feedback[0]['payload']['outcome']=='stop':return None
-        heart=next((r['payload'] for r in rows if r['kind']=='heartbeat'),{})
-        if heart.get('interventions_enabled') is False:return None
-        offers=[r for r in rows if r['kind']=='intervention' and dt(r['at']).date()==at.date()]
-        if len(offers)>=2 or any((at-dt(r['at'])).total_seconds()<3600 for r in offers):return None
-        state=self.infer(p,at);fatigue=(state.get('current') or {}).get('fatigue',{}).get('value')
-        z=state.get('comparisons',{}).get('all',{}).get('fatigue',{}).get('z')
-        if fatigue is None or z is None or fatigue<4 or z<1:return None
-        q=dict(id=str(uuid4()),participantID=p,kind='breakCheck',prompt='必要であれば、少し休憩しませんか？',
-               options=[dict(label=x,value=y) for x,y in [('休憩する','accepted'),('今はしない','declined'),('後で','deferred'),('提案を停止','stop')]],
-               allowFreeText=False,eventType='break_suggestion',detectedAt=iso(at),questionShownAt=None,snoozeCount=0,
-               context=dict(time_of_day='afternoon',typing_active=False,calendar_busy=False,external_trigger='model'))
-        self.store.save('intervention',q['id'],p,at,dict(question=q,evidence=state))
-        return q
+        return self.questions.pending(p,dt(at or utc()))
 
     def pmtt(self,p):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
@@ -266,6 +230,33 @@ def install(app,store,config):
     def heartbeat(payload:Heartbeat):
         return dict(inserted=store.save('heartbeat',payload.event_id,payload.participant_id,payload.occurred_at,payload.model_dump(mode='json')))
 
+    @app.post('/api/research/{participant}/events')
+    async def research_event(participant:str,payload:ResearchEvent):
+        p=identifier(participant)
+        if payload.participant_id!=p:raise HTTPException(422,'Participant mismatch')
+        body=payload.model_dump(mode='json')
+        # Keep the source Mac export complete; forward immediately for queue consistency.
+        qid=payload.payload.get('question_id')
+        if qid and not upstream:
+            q=next((r['payload'] for r in engine.rows(p) if r['kind']=='question_issued' and r['id']==qid),None)
+            if q is None:raise HTTPException(422,'Unknown question')
+            expected={'weather_mood':'weatherMood','typing_reason':'typingReason','intervention_outcome':'breakCheck'}.get(payload.kind)
+            if expected and q['kind']!=expected:raise HTTPException(422,'Question type mismatch')
+            if payload.kind=='intervention_outcome' and not any(o['value']=='accept:'+payload.payload['action'] for o in q['options']):
+                raise HTTPException(422,'Action was not offered')
+        inserted=store.save('research_event',payload.event_id,p,payload.occurred_at,dict(body,received_at=iso(utc())))
+        forwarded=await proxy(f'/api/research/{p}/events','POST',body)
+        return forwarded or dict(inserted=inserted)
+
+    @app.get('/api/research/{participant}/insights')
+    async def insights(participant:str):
+        p=identifier(participant)
+        forwarded=await proxy(f'/api/research/{p}/insights')
+        if forwarded:return forwarded
+        result=await asyncio.to_thread(engine.insights.snapshot,p,utc())
+        result['preferences']=question_settings(engine.rows(p))
+        return result
+
     @app.get('/api/research/{participant}/overview')
     async def overview(participant:str):
         p=identifier(participant)
@@ -300,6 +291,11 @@ def install(app,store,config):
     def dashboard(participant:str):
         p=identifier(participant)
         return HTMLResponse((Path(__file__).parent/'dashboard.html').read_text().replace('__PARTICIPANT__',p),headers={'Content-Security-Policy':"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"})
+
+    @app.get('/research/{participant}/insights',response_class=HTMLResponse)
+    def insights_dashboard(participant:str):
+        p=identifier(participant)
+        return HTMLResponse((Path(__file__).parent/'insights.html').read_text().replace('__PARTICIPANT__',p),headers={'Content-Security-Policy':"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"})
 
     # Preserve original lifespan, including scanner shutdown / DB ownership.
     original=app.router.lifespan_context
