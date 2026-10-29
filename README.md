@@ -103,3 +103,9 @@ curl http://100.106.185.3:8000/health
 | `PUT /api/devices/{id}/name` | `participant_id` と `name` で設置場所を保存 |
 
 開閉データの形式は [SwitchBot公式BLE仕様](https://github.com/OpenWonderLabs/SwitchBotAPI-BLE/blob/latest/devicetypes/contactsensor.md)、macOSの受信は [Bleak公式ドキュメント](https://bleak.readthedocs.io/en/latest/backends/macos.html) を参照しています。
+
+## 三階層LSTM研究機能（追加）
+
+Micro最大1時間・Meso1日・Macro固定週のモデル、現在/当日全体の5項目、個人基準比較、学習/比較評価、全種類エクスポート、Mac→Ubuntu差分同期、質問・可視化・訂正・休憩提案を追加した。Macでは従来の収集を継続し、Ubuntuで `research_enabled` を有効にする。**既定では自動学習しない。**
+
+設定、学習コマンド、検証済み事項と未実装/未検証事項は [docs/research.md](docs/research.md) を参照。

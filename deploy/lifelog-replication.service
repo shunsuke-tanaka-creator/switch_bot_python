@@ -1,0 +1,18 @@
+[Unit]
+Description=Pull Mac lifelog records to Ubuntu
+After=network-online.target lifelog-research.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=research
+WorkingDirectory=/opt/switch_bot_python
+EnvironmentFile=/opt/switch_bot_python/replication.env
+ExecStart=/opt/switch_bot_python/.venv/bin/python -m research.cli --participant p001 sync --source ${MAC_SOURCE} --watch
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

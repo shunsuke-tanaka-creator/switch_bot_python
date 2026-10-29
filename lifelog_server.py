@@ -177,6 +177,8 @@ class Store:
             alias = self.db.execute("SELECT name FROM device_names WHERE participant=? AND id=?", (participant, identifier)).fetchone()
             payload = dict(state, device_id=identifier, name=alias[0] if alias else name, last_seen=stamp(received_at), rssi=rssi)
             self.db.execute("INSERT OR REPLACE INTO devices VALUES(?,?,?)", (participant, identifier, json.dumps(payload)))
+            observation_id = identifier + ":" + received_at.strftime("%Y%m%d%H%M")
+            self.save("switchbot_observation", observation_id, participant, received_at, payload)
             if previous is None or previous["state"] != state["state"]:
                 payload["initial_observation"] = previous is None
                 self.save("switchbot", str(uuid4()), participant, received_at, payload)
@@ -215,7 +217,8 @@ def timeline_item(row):
         title = "キーボード入力"
         detail = f'{len(p["events"])}イベント・{round((parsed(p["ended_at"])-parsed(p["started_at"])).total_seconds())}秒'
     elif kind == "narrative":
-        title = activity_label(p)
+        kind_ = p.get("question", {}).get("kind")
+        title = {"currentState": "現在の状態の回答", "nightReflection": "1日全体の回答"}.get(kind_) or activity_label(p)
         detail = p.get("question", {}).get("prompt", "本人の回答")
     elif kind == "switchbot":
         state = {"close": "閉じている", "open": "開いている", "timeOutNotClose": "開いたまま"}.get(p["state"], "不明")
@@ -333,7 +336,8 @@ def create_app(config=None, store=None):
 
     @app.post("/api/sessions")
     def sessions(payload: Session):
-        return dict(inserted=store.save("session", payload.session_id, payload.participant_id, payload.ended_at, payload.model_dump(mode="json")))
+        p = payload.model_dump(mode="json"); p["received_at"] = stamp(now())
+        return dict(inserted=store.save("session", payload.session_id, payload.participant_id, payload.ended_at, p))
 
     @app.post("/api/narrative-events")
     def narratives(payload: Narrative | list[Narrative]):
@@ -357,9 +361,21 @@ def create_app(config=None, store=None):
                  question={"kind": "activityCheck", "prompt": "今、何をしていますか？"}, answer={"free_text": payload.label}, source="parent_app")
         return dict(inserted=store.save("narrative", payload.event_id, payload.participant_id, payload.occurred_at, p))
 
-    @app.get("/api/questions/pending/{participant_id}", status_code=204)
-    def pending(participant_id: str):
-        # Keyboard continues using its existing local question policy.
+    @app.get("/api/questions/pending/{participant_id}")
+    async def pending(participant_id: str):
+        from research.service import identifier
+        identifier(participant_id)
+        if config.get("research_upstream"):
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    r = await client.get(config["research_upstream"].rstrip("/") + "/api/questions/pending/" + participant_id)
+                return Response(content=r.content, status_code=r.status_code, media_type="application/json")
+            except httpx.HTTPError:
+                return Response(status_code=204)
+        if config.get("research_enabled"):
+            q = await asyncio.to_thread(app.state.research.pending, participant_id)
+            if q: return q
         return Response(status_code=204)
 
     @app.get("/api/dashboard/{participant_id}")
@@ -370,7 +386,7 @@ def create_app(config=None, store=None):
         end = start + timedelta(days=1)
         with store.lock:
             snapshot = snapshot_seq if snapshot_seq is not None else store.db.execute("SELECT COALESCE(MAX(seq),0) FROM records").fetchone()[0]
-        rows = store.rows(participant_id, start, end, snapshot)
+        rows = [r for r in store.rows(participant_id, start, end, snapshot) if r["kind"] in {"session", "narrative", "switchbot", "context", "sensor"}]
         recent = store.rows(participant_id, at-timedelta(hours=24), at+timedelta(microseconds=1))
         sessions_ = [r["payload"] for r in rows if r["kind"] == "session"]
         narratives_ = [r for r in rows if r["kind"] == "narrative"]
@@ -420,6 +436,8 @@ def create_app(config=None, store=None):
             raise HTTPException(404, "Record not found")
         return json.loads(row[0])
 
+    from research.service import install
+    install(app, store, config)
     return app
 
 

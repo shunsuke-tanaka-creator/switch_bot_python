@@ -1,0 +1,19 @@
+[Unit]
+Description=Personal multiscale research API and learning worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=research
+WorkingDirectory=/opt/switch_bot_python
+ExecStart=/opt/switch_bot_python/.venv/bin/python lifelog_server.py --config server-config.json --no-ble
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=4
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
