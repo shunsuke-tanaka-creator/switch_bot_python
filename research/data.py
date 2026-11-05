@@ -71,6 +71,7 @@ class Timeline:
                 start, end = dt(p['started_at']), dt(p['ended_at'])
                 self.events.append((end, 'session', p))
                 for e in p.get('events', []):
+                    if e.get('data',{}).get('purpose')=='assessment': continue
                     if e.get('type') in {'key','delete','commit','context','kana','conversion'}:
                         self.events.append((dt(e['time']), e['type'], dict(e.get('data', {}), _available_at=p.get('received_at') or p['ended_at'])))
             elif kind in {'switchbot','switchbot_observation','heartbeat','sensor'}:

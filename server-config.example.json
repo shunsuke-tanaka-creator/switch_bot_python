@@ -2,9 +2,21 @@
   "host": "100.106.185.3",
   "port": 8000,
   "participant_id": "p001",
-  "allowed_clients": ["100.124.206.1", "100.106.185.3", "127.0.0.1", "::1"],
+  "allowed_clients": [
+    "100.124.206.1",
+    "100.106.185.3",
+    "127.0.0.1",
+    "::1"
+  ],
   "database": "data/lifelog.sqlite3",
   "ble_enabled": true,
   "stale_seconds": 120,
-  "devices": {}
+  "devices": {},
+  "research_enabled": true,
+  "research_models": "data/models",
+  "fatigue_delta": 1.0,
+  "fatigue_z": 2.0,
+  "typing_min_inserts": 100,
+  "pattern_radius": 0.35,
+  "trend_min_weeks": 6
 }

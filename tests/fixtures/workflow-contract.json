@@ -1,0 +1,241 @@
+{
+  "questions": [
+    {
+      "id": "contract-weatherMood",
+      "participantID": "p001",
+      "kind": "weatherMood",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "☀️ 晴れ・うれしい",
+          "value": "happy"
+        },
+        {
+          "label": "☁️ くもり・ふつう",
+          "value": "normal"
+        },
+        {
+          "label": "🌧️ 雨・悲しい",
+          "value": "sad"
+        },
+        {
+          "label": "⛈️ 雷・いらだち",
+          "value": "angry"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      }
+    },
+    {
+      "id": "contract-currentState",
+      "participantID": "p001",
+      "kind": "currentState",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "回答を始める",
+          "value": "start_current_state"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      }
+    },
+    {
+      "id": "contract-typingReason",
+      "participantID": "p001",
+      "kind": "typingReason",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "誤入力",
+          "value": "mistype"
+        },
+        {
+          "label": "文章を考え直した",
+          "value": "rewrite"
+        },
+        {
+          "label": "変換が合わない",
+          "value": "conversion"
+        },
+        {
+          "label": "わからない",
+          "value": "unknown"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      }
+    },
+    {
+      "id": "contract-breakCheck",
+      "participantID": "p001",
+      "kind": "breakCheck",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "短い休憩",
+          "value": "accept:short_break"
+        },
+        {
+          "label": "軽い気分転換",
+          "value": "accept:refresh"
+        },
+        {
+          "label": "作業の切り替え",
+          "value": "accept:switch_task"
+        },
+        {
+          "label": "今はしない",
+          "value": "declined"
+        },
+        {
+          "label": "提案を停止",
+          "value": "stop"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      }
+    },
+    {
+      "id": "contract-supportOutcome",
+      "participantID": "p001",
+      "kind": "supportOutcome",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "実行して役立った",
+          "value": "outcome:short_break:helpful"
+        },
+        {
+          "label": "実行して変わらない",
+          "value": "outcome:short_break:unchanged"
+        },
+        {
+          "label": "実行して悪化した",
+          "value": "outcome:short_break:worse"
+        },
+        {
+          "label": "実行していない",
+          "value": "outcome:short_break:not_executed"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      },
+      "relatedID": "offered-break"
+    },
+    {
+      "id": "contract-outingDestination",
+      "participantID": "p001",
+      "kind": "outingDestination",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "いつもの場所",
+          "value": "usual"
+        },
+        {
+          "label": "新しい場所",
+          "value": "new_place"
+        },
+        {
+          "label": "予定変更",
+          "value": "changed_plan"
+        },
+        {
+          "label": "外出していない",
+          "value": "not_outside"
+        },
+        {
+          "label": "答えない",
+          "value": "declined"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      }
+    },
+    {
+      "id": "contract-nightReflection",
+      "participantID": "p001",
+      "kind": "nightReflection",
+      "prompt": "今の気分を天気でいうと？",
+      "options": [
+        {
+          "label": "回答を始める",
+          "value": "start_daily_reflection"
+        }
+      ],
+      "allowFreeText": false,
+      "eventType": "routine_weatherMood",
+      "detectedAt": "2026-10-29T09:00:00.000+09:00",
+      "questionShownAt": null,
+      "snoozeCount": 0,
+      "expiresAt": "2026-10-29T10:00:00.000+09:00",
+      "context": {
+        "time_of_day": "afternoon",
+        "typing_active": false,
+        "calendar_busy": false,
+        "external_trigger": "server-v2"
+      }
+    }
+  ]
+}

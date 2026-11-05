@@ -104,10 +104,10 @@ def test_current_and_night_question_cooldown(tmp_path):
     with StoreContext() as store:
         engine=Engine(store,dict(research_models=str(tmp_path)))
         t=dt('2026-10-29T09:00:00+09:00')
-        q=engine.pending('p001',t);assert q['kind']=='currentState'
+        q=engine.pending('p001',t);assert q['kind']=='weatherMood'
         assert engine.pending('p001',t+timedelta(minutes=1))['id']==q['id']
         store.save('narrative',q['id'],'p001',t+timedelta(minutes=2),dict(question=dict(kind='currentState'),answer=dict(label='current_state')))
-        assert engine.pending('p001',t+timedelta(hours=1)) is None
+        assert engine.pending('p001',t+timedelta(minutes=30)) is None
         assert engine.pending('p001',t+timedelta(hours=3,minutes=3))['id']!=q['id']
         assert engine.pending('p001',t.replace(hour=22))['kind']=='nightReflection'
         assert engine.pending('p001',t.replace(hour=2)) is None
