@@ -197,13 +197,13 @@
         <div class="scroll"><table id="trends"></table></div>
       </section>
       <section>
-        <h2>名前のない場所クラス</h2>
+        <h2>拠点とタスク</h2><p><a href="/research/__PARTICIPANT__/context">拠点・タスクの推定、命名・訂正、1日の振り返りを開く</a></p>
         <p id="placeSummary"></p>
         <p id="destination"></p>
         <svg id="places" role="img" aria-label="場所と移動のトポロジー"></svg>
         <div class="scroll"><table id="placeRows"></table></div>
         <p class="muted">
-          予測した行き先と、観測した到着先は別です。位置を取れない時間帯を不在と扱いません。
+          GPSによる場所分類は停止しました。拠点とタスクは行動の流れから別々に推定します。
         </p>
       </section>
       <section>
@@ -392,7 +392,7 @@
             );
           }
           $("placeSummary").textContent =
-            `場所${d.places.nodes.length}クラス・移動${d.places.edges.length}接続。`;
+            "拠点とタスクの詳細は上のリンクから確認できます。";
           $("patternSummary").textContent =
             `生活${d.patterns.nodes.length}クラス・遷移${d.patterns.edges.length}接続。` +
             (d.patterns.nodes.length > 30
@@ -414,7 +414,7 @@
                       "%",
                   )
                   .join(" ／ ")
-              : "行き先の予測には移動履歴が不足しています。";
+              : "";
           applyReadOnly();
         } catch (e) {
           $("error").textContent = e.message;
@@ -466,6 +466,13 @@
       }
       async function save(value, text = null) {
         try {
+          if (["placeCheck","taskCheck"].includes(pending.kind))
+            await emit("context_label", {
+              axis: pending.kind === "placeCheck" ? "place" : "task",
+              class_id: value, question_id: pending.id,
+              start: new Date(new Date(pending.detectedAt).getTime()-300000).toISOString(),
+              end: pending.detectedAt,
+            });
           if (pending.kind === "weatherMood")
             await emit("weather_mood", {
               weather: value,

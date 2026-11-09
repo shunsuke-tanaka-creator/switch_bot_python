@@ -186,7 +186,11 @@ def test_data_modes_keep_real_separate_and_combine_chronologically():
 
 
 def test_sample_generation_is_deterministic_idempotent_and_manifest_guarded(tmp_path):
-    calendar_path=Path('data/private/p001-calendar-tags.json')
+    from research.sample_data import SCHEMA
+    calendar_path=tmp_path/'calendar.json'
+    calendar_path.write_text(json.dumps(dict(schema_version=SCHEMA,participant_id="p001",timezone="Asia/Tokyo",seed=17,days=[
+        dict(date=(dt('2026-10-01T00:00:00+09:00')+timedelta(days=i)).date().isoformat(),
+             tags=[['lab','work','travel','drinking'][i%4]],events=[]) for i in range(31)])))
     calendar,_=load_calendar(calendar_path)
     now=dt('2026-11-01T17:00:00+09:00')
     assert build_records(calendar,include_today=True,now=now)==build_records(calendar,include_today=True,now=now)
@@ -194,8 +198,9 @@ def test_sample_generation_is_deterministic_idempotent_and_manifest_guarded(tmp_
     with StoreContext() as store:
         one=generate_sample(calendar_path,store=store,manifest_path=manifest,include_today=True,now=now)
         two=generate_sample(calendar_path,store=store,manifest_path=manifest,include_today=True,now=now+timedelta(hours=1))
-        assert one['inserted']==1053 and two['inserted']==0 and two['existing']==1053
-        assert len(store.rows('p001'))==0 and len(store.rows('p001-sample'))==1053
+        count=len(build_records(calendar,include_today=True,now=now))
+        assert one['inserted']==count and two['inserted']==0 and two['existing']==count
+        assert len(store.rows('p001'))==0 and len(store.rows('p001-sample'))==count
         labels=Timeline(store.rows('p001-sample')).labels
         values={tuple(l.values) for l in labels if l.scope in ('current','daily')}
         assert len(values)>10 and all(np.isfinite(l.values).all() for l in labels if l.scope in ('current','daily'))

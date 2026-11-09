@@ -1,4 +1,4 @@
-"""Versioned cross-client event contract. Coordinates intentionally never leave iPhone."""
+"""Versioned cross-client event contract. GPS observations are legacy-only and excluded from behavioral context."""
 
 from datetime import datetime, timedelta, timezone
 import math
@@ -14,6 +14,9 @@ class ResearchEvent(BaseModel):
     participant_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
     occurred_at: datetime
     kind: Literal[
+        "context_label",
+        "context_name",
+        "context_merge",
         "weather_mood",
         "place_visit",
         "typing_reason",
@@ -31,6 +34,9 @@ class ResearchEvent(BaseModel):
             raise ValueError("timezone required; future events rejected")
         p = self.payload
         fields = {
+            "context_label": ({"axis", "class_id", "start", "end"}, {"question_id"}),
+            "context_name": ({"axis", "class_id", "name"}, set()),
+            "context_merge": ({"axis", "source_id", "target_id"}, set()),
             "weather_mood": ({"weather"}, {"question_id"}),
             "place_visit": ({"place_id", "phase", "accuracy_m"}, {"device_id"}),
             "typing_reason": ({"question_id", "reason"}, set()),
@@ -53,6 +59,26 @@ class ResearchEvent(BaseModel):
         required, optional = fields[self.kind]
         if not required <= p.keys() or p.keys() - (required | optional):
             raise ValueError("invalid payload fields")
+        if self.kind.startswith("context_"):
+            from .data import dt
+            if p["axis"] not in ("place", "task"):
+                raise ValueError("invalid axis")
+            for k in ("class_id", "source_id", "target_id"):
+                if k not in p: continue
+                value=p[k]
+                special=self.kind=="context_label" and value in ("unknown", "moving")
+                if not special and (not isinstance(value,str) or not re.fullmatch(p["axis"]+r"_[A-Za-z0-9_-]{1,100}",value)):
+                    raise ValueError("identity must belong to the selected axis")
+                if value=="moving" and p["axis"]!="place":raise ValueError("moving is a place status")
+            if self.kind=="context_label":
+                try: start,end=dt(p["start"]),dt(p["end"])
+                except (TypeError, ValueError, AttributeError):raise ValueError("invalid interval")
+                if not start<end<=self.occurred_at or end-start>timedelta(days=7):
+                    raise ValueError("interval must precede the answer and be at most 7 days")
+            if self.kind=="context_name" and (not isinstance(p["name"],str) or not 1<=len(p["name"].strip())<=80):
+                raise ValueError("name must contain 1..80 characters")
+            if self.kind=="context_merge" and p["source_id"]==p["target_id"]:
+                raise ValueError("cannot merge with itself")
         if self.kind == "weather_mood" and p["weather"] not in (
             "happy",
             "normal",

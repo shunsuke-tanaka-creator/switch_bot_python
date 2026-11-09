@@ -22,6 +22,7 @@ from .data_modes import (
     source_identity,
 )
 from .events import ResearchEvent
+from .context_service import ContextEngine
 from .insights import InsightEngine
 from .questions import QuestionQueue, settings as question_settings
 
@@ -119,6 +120,7 @@ class Engine:
         self.root=Path(config.get('research_models','data/models'));self.root.mkdir(parents=True,exist_ok=True)
         self.sample_participant=config.get('research_sample_participant',DEFAULT_SAMPLE_PARTICIPANT)
         self.sample_manifest=Path(config.get('research_sample_manifest',f'data/sample/{self.sample_participant}/manifest.json'))
+        self.context=ContextEngine(store,config)
         self.insights=InsightEngine(store,config)
         self.questions=QuestionQueue(store,self.insights)
 
@@ -257,6 +259,21 @@ class Engine:
             key=r['kind']+':'+r['id'];nodes[key]=dict(id=key,kind='Observation',source=r['kind'],at=r['at'])
             edges.extend([dict(source=key,target=work,kind='provenance'),dict(source=work,target=day,kind='part_of'),dict(source=day,target=week,kind='part_of')])
             if r['kind']=='correction':nodes[key]['interval']=[r['payload']['start'],r['payload']['end']]
+        from .context_data import catalog
+        classes,aliases=catalog(rows,dt(utc()))
+        from .context_data import resolve
+        for axis in ('place','task'):
+            for item in classes[axis].values():
+                nodes[item['id']]=dict(id=item['id'],kind='ContextPlace' if axis=='place' else 'ContextTask',name=item['name'],confirmed=item['confirmed'])
+        for r in rows:
+            if r['kind']!='context_inference':continue
+            key='context:'+r['id'];nodes[key]=dict(id=key,kind='ContextEpisode',at=r['at'],source='live_inference')
+            for axis in ('place','task'):
+                value=r['payload'].get(axis) or {};target=value.get('id')
+                if target:
+                    target=resolve(aliases[axis],target)
+                    nodes.setdefault(target,dict(id=target,kind='ContextPlace' if axis=='place' else 'ContextTask'))
+                    edges.append(dict(source=key,target=target,kind=axis,provenance=value.get('source')))
         unique={json.dumps(e,sort_keys=True):e for e in edges}
         return dict(nodes=list(nodes.values()),edges=list(unique.values()))
 
@@ -293,15 +310,28 @@ def install(app,store,config):
         p=identifier(participant)
         if payload.participant_id!=p:raise HTTPException(422,'Participant mismatch')
         body=payload.model_dump(mode='json')
+        if payload.kind=='place_visit':
+            # Old phones/outboxes receive an ACK without adding new GPS-derived observations.
+            return dict(inserted=False,ignored='gps_disabled')
+
         # Keep the source Mac export complete; forward immediately for queue consistency.
         qid=payload.payload.get('question_id')
         if qid and not upstream:
             q=next((r['payload'] for r in engine.rows(p) if r['kind']=='question_issued' and r['id']==qid),None)
             if q is None:raise HTTPException(422,'Unknown question')
-            expected={'weather_mood':'weatherMood','typing_reason':'typingReason','intervention_outcome':'breakCheck'}.get(payload.kind)
+            expected={'weather_mood':'weatherMood','typing_reason':'typingReason','intervention_outcome':'breakCheck','context_label':('placeCheck' if payload.payload.get('axis')=='place' else 'taskCheck')}.get(payload.kind)
             if expected and q['kind']!=expected:raise HTTPException(422,'Question type mismatch')
+            if payload.kind=='context_label':
+                if payload.payload['class_id'] not in [o['value'] for o in q['options']]:raise HTTPException(422,'Identity was not offered')
+                if dt(payload.payload['end'])!=dt(q['detectedAt']) or dt(payload.payload['start'])!=dt(q['detectedAt'])-timedelta(minutes=5):raise HTTPException(422,'Answer must label the question observation window')
+
             if payload.kind=='intervention_outcome' and not any(o['value']=='accept:'+payload.payload['action'] for o in q['options']):
                 raise HTTPException(422,'Action was not offered')
+        if payload.kind in ('context_name','context_merge') and not upstream:
+            from .context_data import catalog
+            nodes,_=catalog(engine.rows(p),utc());axis=payload.payload['axis']
+            ids=[payload.payload['class_id']] if payload.kind=='context_name' else [payload.payload['source_id'],payload.payload['target_id']]
+            if any(key not in nodes[axis] for key in ids):raise HTTPException(422,'Unknown identity for this participant')
         inserted=store.save('research_event',payload.event_id,p,payload.occurred_at,dict(body,received_at=iso(utc())))
         forwarded=await proxy(f'/api/research/{p}/events','POST',body)
         return forwarded or dict(inserted=inserted)
@@ -314,9 +344,31 @@ def install(app,store,config):
         records=engine.rows(p,data_mode_)
         prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,None,data_mode_)
         result=await asyncio.to_thread(engine.insights.snapshot,p,utc(),prediction,records,data_mode_)
+        result['context']=engine.context.snapshot(p,utc(),records) if data_mode_=='real' else dict(status='real_only')
         result['preferences']=question_settings(engine.rows(p,'real'))
         result['data_mode']=data_mode_;result['contains_sample']=data_mode_!='real' or p==engine.sample_participant
         return result
+
+    @app.get('/research/{participant}/context',response_class=HTMLResponse)
+    async def context_page(participant:str):
+        p=identifier(participant)
+        return HTMLResponse((Path(__file__).parent/'context.html').read_text().replace('__PARTICIPANT__',p),headers={'Content-Security-Policy':"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"})
+
+    @app.get('/api/research/{participant}/context')
+    async def context_snapshot(participant:str):
+        p=identifier(participant)
+        forwarded=await proxy(f'/api/research/{p}/context')
+        return forwarded or await asyncio.to_thread(engine.context.snapshot,p,utc())
+
+    @app.post('/api/research/{participant}/context/review/{day}')
+    async def context_review(participant:str,day:str):
+        p=identifier(participant)
+        try: datetime.strptime(day,'%Y-%m-%d')
+        except ValueError:raise HTTPException(422,'Expected YYYY-MM-DD')
+        forwarded=await proxy(f'/api/research/{p}/context/review/{day}','POST')
+        if forwarded:return forwarded
+        try:return await asyncio.to_thread(engine.context.review,p,day,utc())
+        except ValueError as exc:raise HTTPException(422,str(exc)) from exc
 
     @app.get('/api/research/{participant}/proposal-preview')
     async def proposal_preview(participant:str,data_mode_:str=Query('real',alias='data_mode')):
@@ -385,7 +437,7 @@ def install(app,store,config):
     async def lifespan(application):
         async with original(application):
             tasks=[]
-            if config.get('research_enabled'):
+            if config.get('research_enabled') and not upstream:
                 async def inference_loop():
                     while True:
                         try:
@@ -409,7 +461,28 @@ def install(app,store,config):
                                     atomic_json(engine.directory(p,data_mode_)/'error.json',dict(at=iso(utc()),error=str(exc)))
                             logging.exception('Research training failed; previous checkpoint preserved')
                         await asyncio.sleep(3600)
-                tasks=[asyncio.create_task(inference_loop()),asyncio.create_task(training_loop())]
+                async def context_training_loop():
+                    while True:
+                        for p in participants(store,engine.sample_participant):
+                            try:await asyncio.to_thread(engine.context.train,p,engine.rows(p),utc())
+                            except Exception:logging.exception('Context training failed; prior checkpoint retained')
+                        await asyncio.sleep(max(60,config.get('context_train_interval_seconds',3600)))
+                async def context_loop():
+                    reviewed={}
+                    while True:
+                        for p in participants(store,engine.sample_participant):
+                            try:
+                                now=utc()
+                                result=await asyncio.to_thread(engine.context.infer,p,now)
+                                store.save('context_inference',str(uuid4()),p,now,result)
+                                day=(dt(now)-timedelta(days=1)).date().isoformat()
+                                if reviewed.get(p)!=day:
+                                    if not any(r['kind']=='context_review' and r['payload']['day']==day for r in engine.rows(p)):
+                                        await asyncio.to_thread(engine.context.review,p,day,now)
+                                    reviewed[p]=day
+                            except Exception:logging.exception('Behavior context worker failed; original records retained')
+                        await asyncio.sleep(60)
+                tasks=[asyncio.create_task(inference_loop()),asyncio.create_task(training_loop()),asyncio.create_task(context_loop()),asyncio.create_task(context_training_loop())]
             try:yield
             finally:
                 for task in tasks:task.cancel()

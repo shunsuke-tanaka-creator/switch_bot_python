@@ -143,7 +143,9 @@ class QuestionQueue:
                     weather_q.add(qid)
                 if ev["kind"] == "typing_reason":
                     reason_q.add(qid)
-            done = answered | weather_q | reason_q
+            context_q={r["payload"]["payload"].get("question_id") for r in history_rows
+                       if r["kind"]=="research_event" and r["payload"]["kind"]=="context_label"}
+            done = answered | weather_q | reason_q | context_q
 
             def expiry(r):
                 return dt(
@@ -372,6 +374,26 @@ class QuestionQueue:
                             ("わからない", "unknown"),
                         ]
                     )
+            # One shared budget/gap for all surfaces. Alternate independent axes.
+            if kind is None and at.hour < 22:
+                from .context_data import catalog, fresh, summary, ident
+                if fresh(rows,at):
+                    nodes,_=catalog(rows,at)
+                    context_history=[r for r in issued if r["payload"]["kind"] in ("placeCheck","taskCheck")]
+                    axis="task" if context_history and context_history[0]["payload"]["kind"]=="placeCheck" else "place"
+                    previous=[r for r in context_history if dt(r["at"]).date()==at.date()]
+                    if len(previous)<2:
+                        kind="placeCheck" if axis=="place" else "taskCheck"
+                        prompt="今いる拠点はどれですか？ 作業が変わっただけなら同じ拠点です。" if axis=="place" else "今のタスクはどれですか？ 拠点が変わっても同じ作業なら同じタスクです。"
+                        event="context:"+axis
+                        noun="拠点" if axis=="place" else "タスク"
+                        current=summary(rows,at)['current'].get(axis) or {}
+                        candidate=current.get('candidate_id') or current.get('id')
+                        ordered=sorted(nodes[axis].values(),key=lambda n:(n['id']!=candidate,not n['confirmed'],n['id']))
+                        options=opts([(n['name'] or noun+' '+n['id'][-5:],n['id']) for n in ordered[:4]])
+                        options+=opts([('新しい'+noun,ident(axis,at.isoformat())),('わからない','unknown')])
+                        if axis=='place':options+=opts([('移動中','moving')])
+                        ttl=30
             if kind is None:
                 # Routine reports are kept alongside event-triggered reports to reduce selection bias.
                 today = [r for r in issued if dt(r["at"]).date() == at.date()]
