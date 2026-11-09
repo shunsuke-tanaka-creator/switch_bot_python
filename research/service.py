@@ -14,6 +14,13 @@ from fastapi import HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from .data import SCALES, ACTIVITIES, Timeline, dt, monday
+from .data_modes import (
+    DATA_MODES,
+    DEFAULT_SAMPLE_PARTICIPANT,
+    data_mode,
+    rows_for_mode,
+    source_identity,
+)
 from .events import ResearchEvent
 from .insights import InsightEngine
 from .questions import QuestionQueue, settings as question_settings
@@ -24,6 +31,9 @@ def iso(t): return t.isoformat(timespec='milliseconds')
 def identifier(p):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',p):raise HTTPException(422,'Invalid participant')
     return p
+def mode(value):
+    try:return data_mode(value)
+    except ValueError as exc:raise HTTPException(422,str(exc)) from exc
 
 
 class Heartbeat(BaseModel):
@@ -67,6 +77,14 @@ class Feedback(BaseModel):
         return self
 
 
+class TrainRequest(BaseModel):
+    data_mode: str = "real"
+    @model_validator(mode='after')
+    def valid(self):
+        data_mode(self.data_mode)
+        return self
+
+
 def export_page(store,p,after=0,snapshot=None,limit=500):
     with store.lock:
         maximum=store.db.execute('SELECT COALESCE(MAX(seq),0) FROM records WHERE participant=?',(p,)).fetchone()[0]
@@ -99,24 +117,40 @@ class Engine:
     def __init__(self,store,config):
         self.store=store;self.config=config
         self.root=Path(config.get('research_models','data/models'));self.root.mkdir(parents=True,exist_ok=True)
+        self.sample_participant=config.get('research_sample_participant',DEFAULT_SAMPLE_PARTICIPANT)
+        self.sample_manifest=Path(config.get('research_sample_manifest',f'data/sample/{self.sample_participant}/manifest.json'))
         self.insights=InsightEngine(store,config)
         self.questions=QuestionQueue(store,self.insights)
 
-    def rows(self,p):return self.store.rows(p)
-    def directory(self,p):return self.root/identifier(p)
+    def rows(self,p,data_mode_='real'):
+        return rows_for_mode(self.store,identifier(p),data_mode(data_mode_),self.sample_participant)
+    def directory(self,p,data_mode_='real'):
+        return self.root/identifier(p)/data_mode(data_mode_)
+    def legacy_directory(self,p):return self.root/identifier(p)
+    def read_path(self,p,data_mode_,name):
+        path=self.directory(p,data_mode_)/name
+        if data_mode_=='real' and not path.exists():
+            legacy=self.legacy_directory(p)/name
+            if legacy.exists():return legacy
+        return path
 
-    def status(self,p):
-        path=self.directory(p)/'status.json'
+    def status(self,p,data_mode_='real'):
+        data_mode_=data_mode(data_mode_)
+        path=self.read_path(p,data_mode_,'status.json')
         result=json.loads(path.read_text()) if path.exists() else dict(status='untrained')
-        error=self.directory(p)/'error.json'
+        result.setdefault('data_mode',data_mode_)
+        result.setdefault('contains_sample',data_mode_!='real' or p==self.sample_participant)
+        error=self.read_path(p,data_mode_,'error.json')
         if error.exists():result['last_error']=json.loads(error.read_text())
         return result
 
-    def infer(self,p,at=None):
-        at=dt(at or utc());rows=self.rows(p);timeline=None
-        status=self.status(p)
-        response=dict(at=iso(at),source='model',status='untrained',current=None,daily=None,comparisons={},activity=None,model=status)
-        checkpoint=self.directory(p)/'active.pt'
+    def infer(self,p,at=None,data_mode_='real'):
+        data_mode_=data_mode(data_mode_)
+        at=dt(at or utc());rows=self.rows(p,data_mode_);timeline=None
+        status=self.status(p,data_mode_)
+        response=dict(at=iso(at),source='model',status='untrained',current=None,daily=None,comparisons={},activity=None,
+                      data_mode=data_mode_,contains_sample=data_mode_!='real' or p==self.sample_participant,model=status)
+        checkpoint=self.read_path(p,data_mode_,'active.pt')
         if not checkpoint.exists():return response
         import numpy as np
         import torch
@@ -169,29 +203,38 @@ class Engine:
             response['comparisons'][name]=result
         return response
 
-    def train(self,p):
+    def train(self,p,data_mode_='real'):
+        data_mode_=data_mode(data_mode_)
         from .train import train
         if self.config.get('research_require_cuda'):
             import torch
             if not torch.cuda.is_available():raise RuntimeError('CUDA unavailable; check the GPU driver and CUDA-enabled PyTorch')
-        rows=self.rows(p)
+        rows=self.rows(p,data_mode_)
         count=len(Timeline(rows).labels)
-        status=self.status(p)
-        if status.get('training_record_count')==count:return dict(status='no_new_labels')
-        result=train(rows,self.directory(p),epochs=self.config.get('research_epochs',20),text_model=self.config.get('text_model'))
+        identity=source_identity(self.store,p,data_mode_,self.sample_participant,self.sample_manifest)
+        status=self.status(p,data_mode_)
+        if status.get('fingerprint')==identity['fingerprint']:
+            return dict(status='no_new_labels',data_mode=data_mode_,contains_sample=data_mode_!='real' or p==self.sample_participant,
+                        fingerprint=identity['fingerprint'],source_max_seq=identity['source_max_seq'],
+                        sample_manifest_hash=identity['sample_manifest_hash'])
+        result=train(rows,self.directory(p,data_mode_),epochs=self.config.get('research_epochs',20),text_model=self.config.get('text_model'),
+                     data_mode=data_mode_,contains_sample=data_mode_!='real' or p==self.sample_participant,
+                     source_fingerprint=identity['fingerprint'],source_max_seq=identity['source_max_seq'],
+                     sample_manifest_hash=identity['sample_manifest_hash'])
         result['training_record_count']=count
-        error=self.directory(p)/'error.json'
+        error=self.directory(p,data_mode_)/'error.json'
         if error.exists():error.unlink()
         from .train import atomic_json
-        atomic_json(self.directory(p)/'status.json',result)
+        atomic_json(self.directory(p,data_mode_)/'status.json',result)
         return result
 
     def pending(self,p,at=None):
+        if p==self.sample_participant:return None
         return self.questions.pending(p,dt(at or utc()))
 
-    def pmtt(self,p):
+    def pmtt(self,p,data_mode_='real'):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
-        rows=self.rows(p);nodes={};edges=[]
+        rows=self.rows(p,data_mode_);nodes={};edges=[]
         for r in rows:
             if r['kind'] not in {'session','narrative','switchbot','correction','inference'}:continue
             at=dt(r['at']);week='week:'+monday(at).date().isoformat();day='day:'+at.date().isoformat();work='work:'+at.replace(minute=0,second=0,microsecond=0).isoformat()
@@ -249,31 +292,47 @@ def install(app,store,config):
         return forwarded or dict(inserted=inserted)
 
     @app.get('/api/research/{participant}/insights')
-    async def insights(participant:str):
-        p=identifier(participant)
-        forwarded=await proxy(f'/api/research/{p}/insights')
+    async def insights(participant:str,data_mode_:str=Query('real',alias='data_mode')):
+        p=identifier(participant);data_mode_=mode(data_mode_)
+        forwarded=await proxy(f'/api/research/{p}/insights?data_mode={data_mode_}')
         if forwarded:return forwarded
-        result=await asyncio.to_thread(engine.insights.snapshot,p,utc())
-        result['preferences']=question_settings(engine.rows(p))
+        records=engine.rows(p,data_mode_)
+        prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,None,data_mode_)
+        result=await asyncio.to_thread(engine.insights.snapshot,p,utc(),prediction,records,data_mode_)
+        result['preferences']=question_settings(engine.rows(p,'real'))
+        result['data_mode']=data_mode_;result['contains_sample']=data_mode_!='real' or p==engine.sample_participant
         return result
 
     @app.get('/api/research/{participant}/overview')
-    async def overview(participant:str):
-        p=identifier(participant)
-        forwarded=await proxy(f'/api/research/{p}/overview')
+    async def overview(participant:str,data_mode_:str=Query('real',alias='data_mode')):
+        p=identifier(participant);data_mode_=mode(data_mode_)
+        forwarded=await proxy(f'/api/research/{p}/overview?data_mode={data_mode_}')
         if forwarded:return forwarded
         # Inference is persisted by the worker, not by every dashboard poll.
-        records=engine.rows(p);latest=next((r['payload'] for r in records if r['kind']=='inference'),None)
-        stale=latest is None or (dt(utc())-dt(latest['at'])).total_seconds()>180
-        prediction=latest if not stale else dict(status='worker_not_running_or_stale',current=None,daily=None)
+        records=engine.rows(p,data_mode_)
+        if data_mode_=='real':
+            latest=next((r['payload'] for r in records if r['kind']=='inference' and r['payload'].get('data_mode','real')=='real'),None)
+            stale=latest is None or (dt(utc())-dt(latest['at'])).total_seconds()>180
+            prediction=latest if not stale else dict(status='worker_not_running_or_stale',current=None,daily=None,data_mode='real',contains_sample=False)
+        else:
+            prediction=await asyncio.to_thread(engine.infer,p,None,data_mode_)
         answers=[dict(at=r['at'],kind=r['payload'].get('question',{}).get('kind'),answer=r['payload'].get('answer')) for r in records if r['kind']=='narrative']
-        return dict(prediction=prediction,model=engine.status(p),answers=answers[:500],activity_catalog=ACTIVITIES,
-                    corrections=[r['payload'] for r in records if r['kind']=='correction'][:100])
+        return dict(prediction=prediction,model=engine.status(p,data_mode_),answers=answers[:500],activity_catalog=ACTIVITIES,
+                    corrections=[r['payload'] for r in records if r['kind']=='correction'][:100],
+                    data_mode=data_mode_,contains_sample=data_mode_!='real' or p==engine.sample_participant)
 
     @app.get('/api/research/{participant}/pmtt')
-    async def pmtt(participant:str):
-        p=identifier(participant);forwarded=await proxy(f'/api/research/{p}/pmtt')
-        return forwarded or engine.pmtt(p)
+    async def pmtt(participant:str,data_mode_:str=Query('real',alias='data_mode')):
+        p=identifier(participant);data_mode_=mode(data_mode_)
+        forwarded=await proxy(f'/api/research/{p}/pmtt?data_mode={data_mode_}')
+        return forwarded or engine.pmtt(p,data_mode_)
+
+    @app.post('/api/research/{participant}/train')
+    async def train_model(participant:str,payload:TrainRequest):
+        p=identifier(participant)
+        body=payload.model_dump()
+        forwarded=await proxy(f'/api/research/{p}/train','POST',body)
+        return forwarded or await asyncio.to_thread(engine.train,p,payload.data_mode)
 
     @app.post('/api/research/{participant}/corrections')
     async def correct(participant:str,payload:Correction):
@@ -307,18 +366,24 @@ def install(app,store,config):
                 async def inference_loop():
                     while True:
                         try:
-                            for p in participants(store):
-                                result=await asyncio.to_thread(engine.infer,p)
+                            for p in participants(store,engine.sample_participant):
+                                result=await asyncio.to_thread(engine.infer,p,None,'real')
                                 t=utc();store.save('inference',str(uuid4()),p,t,result)
                         except Exception:logging.exception('Research inference failed')
                         await asyncio.sleep(60)
                 async def training_loop():
                     while True:
                         try:
-                            for p in participants(store):await asyncio.to_thread(engine.train,p)
+                            modes=config.get('research_training_modes',['real'])
+                            if not isinstance(modes,list) or any(x not in DATA_MODES for x in modes):
+                                raise ValueError('research_training_modes must contain real, sample, or combined')
+                            for p in participants(store,engine.sample_participant):
+                                for data_mode_ in modes:await asyncio.to_thread(engine.train,p,data_mode_)
                         except Exception as exc:
                             from .train import atomic_json
-                            for p in participants(store):atomic_json(engine.directory(p)/'error.json',dict(at=iso(utc()),error=str(exc)))
+                            for p in participants(store,engine.sample_participant):
+                                for data_mode_ in config.get('research_training_modes',['real']):
+                                    atomic_json(engine.directory(p,data_mode_)/'error.json',dict(at=iso(utc()),error=str(exc)))
                             logging.exception('Research training failed; previous checkpoint preserved')
                         await asyncio.sleep(3600)
                 tasks=[asyncio.create_task(inference_loop()),asyncio.create_task(training_loop())]
@@ -331,5 +396,6 @@ def install(app,store,config):
     return engine
 
 
-def participants(store):
-    with store.lock:return [r[0] for r in store.db.execute('SELECT DISTINCT participant FROM records')]
+def participants(store,sample_participant=DEFAULT_SAMPLE_PARTICIPANT):
+    with store.lock:
+        return [r[0] for r in store.db.execute('SELECT DISTINCT participant FROM records') if r[0]!=sample_participant]

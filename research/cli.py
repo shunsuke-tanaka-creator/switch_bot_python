@@ -11,6 +11,7 @@ import httpx
 from lifelog_server import Store
 from .service import export_page, ingest_page, identifier
 from .data import dt
+from .data_modes import DATA_MODES, DEFAULT_SAMPLE_PARTICIPANT, rows_for_mode, source_identity
 
 
 def export_all(store, participant, path):
@@ -77,7 +78,17 @@ def main():
     sy=sub.add_parser('sync');sy.add_argument('--source',required=True);sy.add_argument('--state',default='data/replication.json');sy.add_argument('--watch',action='store_true')
     for name in ('train','compare','personalize'):
         tr=sub.add_parser(name);tr.add_argument('--models',default='data/models');tr.add_argument('--epochs',type=int,default=20);tr.add_argument('--text-model',default=None)
-    args=p.parse_args();identifier(args.participant);store=Store(args.db)
+        tr.add_argument('--data-mode',choices=DATA_MODES,default='real');tr.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
+        tr.add_argument('--sample-manifest',default=None)
+    sample=sub.add_parser('generate-sample');sample.add_argument('--calendar',required=True);sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
+    sample.add_argument('--manifest',default=None);sample.add_argument('--dry-run',action='store_true');sample.add_argument('--include-today',action='store_true')
+    args=p.parse_args();identifier(args.participant)
+    if args.command=='generate-sample' and args.dry_run:
+        from .sample_data import generate_sample
+        result=generate_sample(args.calendar,args.sample_participant,args.participant,manifest_path=args.manifest,
+                               dry_run=True,include_today=args.include_today)
+        print(json.dumps(result,ensure_ascii=False,allow_nan=False));return
+    store=Store(args.db)
     try:
         if args.command=='export':result=export_all(store,args.participant,args.path)
         elif args.command=='import':result=dict(inserted=import_file(store,args.path,args.participant))
@@ -89,10 +100,24 @@ def main():
                     import logging;logging.exception('Replication failed; cursor retained')
                 if not args.watch:return
                 time.sleep(60)
+        elif args.command=='generate-sample':
+            from .sample_data import generate_sample
+            result=generate_sample(args.calendar,args.sample_participant,args.participant,store=store,manifest_path=args.manifest,
+                                   include_today=args.include_today)
         else:
             from .train import train,ablations,personalization_evaluation
             action={'compare':ablations,'train':train,'personalize':personalization_evaluation}[args.command]
-            result=action(store.rows(args.participant),Path(args.models)/args.participant,epochs=args.epochs,text_model=args.text_model)
+            manifest=args.sample_manifest or f'data/sample/{args.sample_participant}/manifest.json'
+            rows=rows_for_mode(store,args.participant,args.data_mode,args.sample_participant)
+            directory=Path(args.models)/args.participant/args.data_mode
+            identity=source_identity(store,args.participant,args.data_mode,args.sample_participant,manifest)
+            metadata=dict(data_mode=args.data_mode,contains_sample=args.data_mode!='real' or args.participant==args.sample_participant,
+                          source_fingerprint=identity['fingerprint'],source_max_seq=identity['source_max_seq'],
+                          sample_manifest_hash=identity['sample_manifest_hash'])
+            if args.command=='train':
+                result=action(rows,directory,epochs=args.epochs,text_model=args.text_model,**metadata)
+            else:
+                result=action(rows,directory/args.command,epochs=args.epochs,text_model=args.text_model,**metadata)
         print(json.dumps(result,ensure_ascii=False,allow_nan=False))
     finally:store.close()
 

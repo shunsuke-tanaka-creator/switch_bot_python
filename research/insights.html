@@ -37,6 +37,15 @@
         background: #edf7f2;
         color: #164e43;
       }
+      select {
+        font: inherit;
+        padding: 8px;
+      }
+      button:disabled,
+      input:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
       button:focus-visible {
         outline: 3px solid #1a7863;
       }
@@ -86,6 +95,13 @@
         background: #e7f3ed;
         border-radius: 8px;
       }
+      .warning {
+        padding: 12px;
+        background: #fff3cd;
+        border: 1px solid #e4b84b;
+        border-radius: 8px;
+        color: #714f00;
+      }
       #error {
         color: #a62828;
       }
@@ -126,7 +142,17 @@
     <main>
       <h1>生活の気づき</h1>
       <p>気分の回答・観測・三階層LSTMの推定を区別して表示します。</p>
-      <p><a href="/research/__PARTICIPANT__">5尺度の履歴・訂正・学習状況</a></p>
+      <p><a id="dashboardLink" href="/research/__PARTICIPANT__">5尺度の履歴・訂正・学習状況</a></p>
+      <label>データ
+        <select id="dataMode">
+          <option value="real">実データ</option>
+          <option value="sample">サンプルのみ</option>
+          <option value="combined">実＋サンプル</option>
+        </select>
+      </label>
+      <p id="sampleWarning" class="warning" hidden>
+        サンプル込みの読み取り専用表示です。質問回答・気分回答・設定変更はできません。
+      </p>
       <p id="error" role="status"></p>
       <section>
         <h2>今のお天気分</h2>
@@ -200,6 +226,8 @@
         api = "/api/research/" + participant,
         $ = (id) => document.getElementById(id),
         ns = "http://www.w3.org/2000/svg";
+      let dataMode = new URLSearchParams(location.search).get("data_mode") || "real";
+      if (!["real", "sample", "combined"].includes(dataMode)) dataMode = "real";
       const weather = {
         happy: "☀️ 晴れ・うれしい",
         normal: "☁️ くもり・ふつう",
@@ -294,7 +322,7 @@
       }
       async function refresh() {
         try {
-          const d = await request(api + "/insights");
+          const d = await request(api + "/insights?data_mode=" + dataMode);
           snapshot = d;
           $("error").textContent = "";
           const f = d.fatigue,
@@ -387,9 +415,22 @@
                   )
                   .join(" ／ ")
               : "行き先の予測には移動履歴が不足しています。";
+          applyReadOnly();
         } catch (e) {
           $("error").textContent = e.message;
         }
+      }
+      function applyReadOnly() {
+        const value = dataMode !== "real";
+        $("sampleWarning").hidden = !value;
+        $("answer").disabled = value;
+        $("defer").disabled = value;
+        $("questions").disabled = value;
+        $("interventions").disabled = value;
+        for (const button of $("weatherButtons").querySelectorAll("button"))
+          button.disabled = value;
+        $("dashboardLink").href =
+          "/research/" + participant + "?data_mode=" + dataMode;
       }
       for (const [value, label] of Object.entries(weather)) {
         const b = document.createElement("button");
@@ -546,6 +587,14 @@
         }, 150);
       });
       $("refresh").onclick = refresh;
+      $("dataMode").value = dataMode;
+      $("dataMode").onchange = () => {
+        dataMode = $("dataMode").value;
+        history.replaceState(null, "", "?data_mode=" + dataMode);
+        applyReadOnly();
+        refresh();
+      };
+      applyReadOnly();
       refresh();
       setInterval(refresh, 60000);
     </script>

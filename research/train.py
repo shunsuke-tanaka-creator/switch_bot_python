@@ -58,11 +58,14 @@ def metrics(model, examples, device, mean, std):
     return result
 
 
-def train(rows, directory, variant='full', use_text=True, adaptation=True, epochs=20, hidden=48, seed=17, evaluate_test=False, min_labels=20, text_model=None):
+def train(rows, directory, variant='full', use_text=True, adaptation=True, epochs=20, hidden=48, seed=17, evaluate_test=False, min_labels=20, text_model=None,
+          data_mode='real', contains_sample=False, source_fingerprint=None, source_max_seq=None, sample_manifest_hash=None):
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
     with (directory/'training.lock').open('w') as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:return dict(status='busy')
+        except BlockingIOError:return dict(status='busy',data_mode=data_mode,contains_sample=contains_sample,
+                                          fingerprint=source_fingerprint,source_max_seq=source_max_seq or {},
+                                          sample_manifest_hash=sample_manifest_hash)
         random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
         torch.set_num_threads(min(4,os.cpu_count() or 1))
         timeline=Timeline(rows,text_model=text_model)
@@ -70,7 +73,9 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
         state=[e for e in examples if e[0].scope in ('current','daily')]
         dates=sorted({l.at.date() for l,_ in state})
         if len(state)<min_labels or len(dates)<5:
-            result=dict(status='insufficient_labels',state_answers=len(state),days=len(dates),required_answers=min_labels,required_days=5)
+            result=dict(status='insufficient_labels',state_answers=len(state),days=len(dates),required_answers=min_labels,required_days=5,
+                        data_mode=data_mode,contains_sample=contains_sample,fingerprint=source_fingerprint,
+                        source_max_seq=source_max_seq or {},sample_manifest_hash=sample_manifest_hash)
             atomic_json(directory/'status.json',result);return result
         a=max(1,int(len(dates)*0.6));b=max(a+1,int(len(dates)*0.8))
         train_end=dates[a];test_start=dates[min(b,len(dates)-1)]
@@ -78,7 +83,10 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
         tr=[e for e in examples if e[0].at.date()<train_end and e[0].available.date()<train_end]
         va=[e for e in examples if train_end<=e[0].at.date()<test_start and e[0].available.date()<test_start]
         te=[e for e in examples if e[0].at.date()>=test_start]
-        if not tr or not va:return dict(status='insufficient_split')
+        if not tr or not va:
+            result=dict(status='insufficient_split',data_mode=data_mode,contains_sample=contains_sample,fingerprint=source_fingerprint,
+                        source_max_seq=source_max_seq or {},sample_manifest_hash=sample_manifest_hash)
+            atomic_json(directory/'status.json',result);return result
         mean_np,std_np=normalization(tr)
         device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         mean=torch.tensor(mean_np,device=device);std=torch.tensor(std_np,device=device)
@@ -103,11 +111,16 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
             score=valid['mean_mae']
             if score is not None and score<best_mae:
                 best_mae=score;best=copy.deepcopy(model.state_dict())
-        if best is None:return dict(status='insufficient_validation_labels')
+        if best is None:
+            result=dict(status='insufficient_validation_labels',data_mode=data_mode,contains_sample=contains_sample,fingerprint=source_fingerprint,
+                        source_max_seq=source_max_seq or {},sample_manifest_hash=sample_manifest_hash)
+            atomic_json(directory/'status.json',result);return result
         model.load_state_dict(best)
         support={scope:[int(sum(l.scope==scope and np.isfinite(l.values[i]) for l,_ in tr)) for i in range(5)] for scope in ('current','daily')}
         identity=hashlib.sha256(json.dumps([(l.id,l.scope,l.at.isoformat(),[None if not np.isfinite(v) else float(v) for v in l.values]) for l,_ in examples],sort_keys=True).encode()).hexdigest()
-        report=dict(status='trained',version=VERSION,fingerprint=identity,device=str(device),settings=model.settings,
+        report=dict(status='trained',version=VERSION,fingerprint=source_fingerprint or identity,label_fingerprint=identity,
+                    data_mode=data_mode,contains_sample=contains_sample,source_max_seq=source_max_seq or {},
+                    sample_manifest_hash=sample_manifest_hash,device=str(device),settings=model.settings,
                     train_n=len(tr),validation_n=len(va),test_n=len(te),train_before=str(train_end),test_from=str(test_start),
                     support=support,activity_train_n=sum(l.scope=='activity' for l,_ in tr),text_model=text_model,text_identity=timeline.encoder.identity if timeline.encoder else 'character-ngram-v1',validation=metrics(model,va,device,mean,std),test=metrics(model,te,device,mean,std) if evaluate_test else None,
                     limitations=['Research estimate, not a diagnosis','Door opening does not establish occupancy','Character n-gram text features; no pretrained language encoder','Historical reception times are not known for legacy imports'])
@@ -136,10 +149,12 @@ def ablations(rows,directory,**kwargs):
     return result
 
 
-def personalization_evaluation(rows, directory, epochs=20, hidden=48, text_model=None):
+def personalization_evaluation(rows, directory, epochs=20, hidden=48, text_model=None, data_mode='real', contains_sample=False,
+                               source_fingerprint=None, source_max_seq=None, sample_manifest_hash=None):
     """Frozen personal model vs sequential fine tuning. Predict a held-out day BEFORE using its labels."""
     base=Path(directory)/'frozen_base'
-    report=train(rows,base,epochs=epochs,hidden=hidden,text_model=text_model)
+    report=train(rows,base,epochs=epochs,hidden=hidden,text_model=text_model,data_mode=data_mode,contains_sample=contains_sample,
+                 source_fingerprint=source_fingerprint,source_max_seq=source_max_seq,sample_manifest_hash=sample_manifest_hash)
     if report['status']!='trained':return report
     state=torch.load(base/'candidate.pt',map_location='cpu',weights_only=True)
     frozen=HierarchicalLSTM(**state['settings']);frozen.load_state_dict(state['weights']);frozen.eval()
@@ -172,7 +187,10 @@ def personalization_evaluation(rows, directory, epochs=20, hidden=48, text_model
                 for name,m in [('frozen',frozen),('updated',adapted)]:
                     values=m(b)[l.scope][0].numpy();totals[name][l.scope][mask]+=np.abs(values[mask]-l.values[mask]);item[name]=values.tolist()
             predictions.append(item)
-    result=dict(protocol='prequential: predict held-out day before learning its answers',test_from=report['test_from'],updated_on_labels=len(used),predictions=predictions,metrics={})
+    result=dict(protocol='prequential: predict held-out day before learning its answers',test_from=report['test_from'],
+                data_mode=data_mode,contains_sample=contains_sample,fingerprint=source_fingerprint,
+                source_max_seq=source_max_seq or {},sample_manifest_hash=sample_manifest_hash,
+                updated_on_labels=len(used),predictions=predictions,metrics={})
     for name in totals:
         result['metrics'][name]={scope:{k:dict(n=int(counts[scope][i]),mae=float(totals[name][scope][i]/counts[scope][i]) if counts[scope][i] else None) for i,k in enumerate(SCALES)} for scope in counts}
     atomic_json(Path(directory)/'personalization.json',result)

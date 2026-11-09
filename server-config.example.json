@@ -14,9 +14,15 @@
   "devices": {},
   "research_enabled": true,
   "research_models": "data/models",
+  "research_training_modes": ["real"],
+  "research_sample_participant": "p001-sample",
+  "research_sample_manifest": "data/sample/p001-sample/manifest.json",
   "fatigue_delta": 1.0,
   "fatigue_z": 2.0,
-  "typing_min_inserts": 100,
+  "typing_daily_min_inserts": 50,
+  "typing_baseline_days": 5,
+  "typing_baseline_provisional_days": 3,
+  "typing_fresh_seconds": 86400,
   "pattern_radius": 0.35,
   "trend_min_weeks": 6
 }

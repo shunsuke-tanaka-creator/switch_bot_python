@@ -62,53 +62,89 @@ def fatigue_change(rows, at, base, prediction, delta_min=1.0, z_min=2.0):
     )
 
 
-def typing_change(windows, at, minimum=100):
+def typing_change(
+    windows,
+    at,
+    minimum=None,
+    *,
+    daily_min_inserts=50,
+    formal_days=5,
+    provisional_days=3,
+    fresh_seconds=86400,
+):
     if not windows:
         return dict(status="insufficient_data", unusual=False)
+    if minimum is not None:
+        daily_min_inserts = minimum
     current = windows[-1]
-    if (at - current["end"]).total_seconds() > 900 or current["inserts"] < minimum:
+    if (at - current["end"]).total_seconds() > fresh_seconds:
         return dict(status="insufficient_data", unusual=False)
-    past = [
+
+    current_date = current["at"].date()
+    matching = [
         w
-        for w in windows[:-1]
-        if w["device"] == current["device"]
-        and w["mode"] == current["mode"]
-        and w["inserts"] >= minimum
-        and w["at"].date() < current["at"].date()
+        for w in windows
+        if w["device"] == current["device"] and w["mode"] == current["mode"]
     ]
-    if len(past) < 20 or len({w["at"].date() for w in past}) < 5:
-        return dict(
-            status="insufficient_data", unusual=False, baseline_windows=len(past)
+    days = {}
+    for window in matching:
+        date = window["at"].date()
+        pooled = days.setdefault(
+            date, dict(inserts=0, bursts=0.0, windows=0, last=None)
         )
+        pooled["inserts"] += window["inserts"]
+        pooled["bursts"] += window["correction_rate"] * window["inserts"]
+        pooled["windows"] += 1
+        if pooled["last"] is None or window["end"] > pooled["last"]["end"]:
+            pooled["last"] = window
+
+    current_day = days[current_date]
+    if current_day["inserts"] < daily_min_inserts:
+        return dict(
+            status="insufficient_data",
+            unusual=False,
+            inserts=current_day["inserts"],
+        )
+
+    valid_past = [
+        (date, pooled)
+        for date, pooled in days.items()
+        if date < current_date and pooled["inserts"] >= daily_min_inserts
+    ]
+    valid_past.sort(key=lambda item: item[0])
+    baseline_days = len(valid_past)
+    baseline_windows = sum(pooled["windows"] for _, pooled in valid_past)
+    if baseline_days < provisional_days:
+        return dict(
+            status="insufficient_data",
+            unusual=False,
+            baseline_windows=baseline_windows,
+            baseline_days=baseline_days,
+        )
+    daily_rates = [
+        pooled["bursts"] / pooled["inserts"] for _, pooled in valid_past
+    ]
     threshold = max(
-        float(np.quantile([w["correction_rate"] for w in past], 0.99)), 0.02
+        float(np.quantile(daily_rates, 0.99)),
+        0.02,
     )
-    previous = next(
-        (
-            w
-            for w in reversed(windows[:-1])
-            if w["device"] == current["device"] and w["mode"] == current["mode"]
-        ),
-        None,
-    )
-    persistent = bool(
-        previous
-        and previous["end"] == current["at"]
-        and previous["inserts"] >= minimum
-        and previous["correction_rate"] > threshold
-    )
-    return dict(
+    current_rate = current_day["bursts"] / current_day["inserts"]
+    previous_rate = daily_rates[-1]
+    result = dict(
         status="available",
-        unusual=bool(current["correction_rate"] > threshold and persistent),
-        correction_rate=current["correction_rate"],
+        unusual=bool(current_rate > threshold and previous_rate > threshold),
+        correction_rate=current_rate,
         threshold=threshold,
-        inserts=current["inserts"],
-        at=current["end"].isoformat(),
-        evidence_id=current["id"],
-        baseline_windows=len(past),
-        baseline_days=len({w["at"].date() for w in past}),
+        inserts=current_day["inserts"],
+        at=current_day["last"]["end"].isoformat(),
+        evidence_id=current_day["last"]["id"],
+        baseline_windows=baseline_windows,
+        baseline_days=baseline_days,
         note="input corrections, not confirmed mistakes",
     )
+    if baseline_days < formal_days:
+        result["provisional"] = True
+    return result
 
 
 class InsightEngine:
@@ -118,9 +154,9 @@ class InsightEngine:
         self.cache = {}
         self.trend_cache = {}
 
-    def snapshot(self, p, at, prediction=None):
+    def snapshot(self, p, at, prediction=None, rows=None, data_mode="real"):
         at = dt(at)
-        rows = available_rows(self.store.rows(p), at)
+        rows = available_rows(self.store.rows(p) if rows is None else rows, at)
         source = [
             r
             for r in rows
@@ -128,13 +164,14 @@ class InsightEngine:
         ]
         signature = tuple((r.get("seq"), r["kind"], r["id"]) for r in source)
         bucket = at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0)
-        key = (p, signature, bucket)
-        if self.cache.get(p, {}).get("key") == key:
-            fixed = self.cache[p]["data"]
+        cache_id = (p, data_mode)
+        key = (cache_id, signature, bucket)
+        if self.cache.get(cache_id, {}).get("key") == key:
+            fixed = self.cache[cache_id]["data"]
         else:
             windows = typing_windows(rows, at)
             trend_key = (
-                p,
+                cache_id,
                 tuple(
                     (r.get("seq"), r["id"])
                     for r in source
@@ -142,8 +179,8 @@ class InsightEngine:
                 ),
                 at.date(),
             )
-            if self.trend_cache.get(p, {}).get("key") != trend_key:
-                self.trend_cache[p] = dict(
+            if self.trend_cache.get(cache_id, {}).get("key") != trend_key:
+                self.trend_cache[cache_id] = dict(
                     key=trend_key,
                     data=weekday_trends(
                         rows, at, min_weeks=self.config.get("trend_min_weeks", 6)
@@ -151,9 +188,18 @@ class InsightEngine:
                 )
             fixed = dict(
                 baseline=conditional(rows, at),
-                trends=self.trend_cache[p]["data"],
+                trends=self.trend_cache[cache_id]["data"],
                 typing=typing_change(
-                    windows, at, minimum=self.config.get("typing_min_inserts", 100)
+                    windows,
+                    at,
+                    daily_min_inserts=self.config.get(
+                        "typing_daily_min_inserts", 50
+                    ),
+                    formal_days=self.config.get("typing_baseline_days", 5),
+                    provisional_days=self.config.get(
+                        "typing_baseline_provisional_days", 3
+                    ),
+                    fresh_seconds=self.config.get("typing_fresh_seconds", 86400),
                 ),
                 patterns=behavior_map(
                     windows,
@@ -173,7 +219,7 @@ class InsightEngine:
                     and r["payload"]["kind"] == "weather_mood"
                 ][-200:],
             )
-            self.cache[p] = dict(key=key, data=fixed)
+            self.cache[cache_id] = dict(key=key, data=fixed)
         if prediction is None:
             latest = next(
                 (

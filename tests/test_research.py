@@ -11,6 +11,8 @@ from research.model import HierarchicalLSTM
 from research.train import batch, train, ablations
 from research.service import Engine, export_page, ingest_page
 from research.cli import import_file, export_all, sync
+from research.data_modes import rows_for_mode, source_identity
+from research.sample_data import build_records, generate_sample, load_calendar
 
 
 def record(kind,id,at,payload):return dict(kind=kind,id=id,at=at.isoformat(),payload=payload,seq=int(at.timestamp()),participant='p001')
@@ -168,3 +170,84 @@ def test_warm_inference_gates_each_head(tmp_path):
         assert 1<=result['current']['mood']['value']<=5
         assert result['daily']['mood']['value'] is None
         assert result['activity'] is None  # no activity labels => no random activity returned
+
+
+def test_data_modes_keep_real_separate_and_combine_chronologically():
+    with StoreContext() as store:
+        first=dt('2026-10-01T09:00:00+09:00');second=first+timedelta(hours=1)
+        store.save('heartbeat','real','p001',second,dict(logging_enabled=True))
+        store.save('heartbeat','sample','p001-sample',first,dict(logging_enabled=True))
+        real=rows_for_mode(store,'p001','real')
+        sample=rows_for_mode(store,'p001','sample')
+        combined=rows_for_mode(store,'p001','combined')
+        assert [r['participant'] for r in real]==['p001']
+        assert [r['participant'] for r in sample]==['p001-sample']
+        assert [r['id'] for r in combined]==['real','sample']
+
+
+def test_sample_generation_is_deterministic_idempotent_and_manifest_guarded(tmp_path):
+    calendar_path=Path('data/private/p001-calendar-tags.json')
+    calendar,_=load_calendar(calendar_path)
+    now=dt('2026-11-01T17:00:00+09:00')
+    assert build_records(calendar,include_today=True,now=now)==build_records(calendar,include_today=True,now=now)
+    manifest=tmp_path/'sample-manifest.json'
+    with StoreContext() as store:
+        one=generate_sample(calendar_path,store=store,manifest_path=manifest,include_today=True,now=now)
+        two=generate_sample(calendar_path,store=store,manifest_path=manifest,include_today=True,now=now+timedelta(hours=1))
+        assert one['inserted']==1053 and two['inserted']==0 and two['existing']==1053
+        assert len(store.rows('p001'))==0 and len(store.rows('p001-sample'))==1053
+        labels=Timeline(store.rows('p001-sample')).labels
+        values={tuple(l.values) for l in labels if l.scope in ('current','daily')}
+        assert len(values)>10 and all(np.isfinite(l.values).all() for l in labels if l.scope in ('current','daily'))
+        altered=tmp_path/'altered.json'
+        value=json.loads(calendar_path.read_text());value['days'][0]['tags']=['none']
+        altered.write_text(json.dumps(value))
+        with pytest.raises(RuntimeError,match='manifest differs'):
+            generate_sample(altered,store=store,manifest_path=manifest,include_today=True,now=now)
+
+
+def test_model_paths_are_mode_separated_with_real_legacy_fallback(tmp_path):
+    with StoreContext() as store:
+        engine=Engine(store,dict(research_models=str(tmp_path)))
+        assert engine.directory('p001','real')==tmp_path/'p001'/'real'
+        assert engine.directory('p001','sample')==tmp_path/'p001'/'sample'
+        legacy=tmp_path/'p001';legacy.mkdir()
+        (legacy/'status.json').write_text(json.dumps(dict(status='trained',fingerprint='legacy')))
+        assert engine.status('p001','real')['fingerprint']=='legacy'
+        engine.directory('p001','real').mkdir()
+        (engine.directory('p001','real')/'status.json').write_text(json.dumps(dict(status='trained',fingerprint='new')))
+        assert engine.status('p001','real')['fingerprint']=='new'
+
+
+def test_training_fingerprint_tracks_mode_source_seq_and_manifest(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{"version":1}')
+    with StoreContext() as store:
+        at=dt('2026-10-01T09:00:00+09:00')
+        store.save('session','real','p001',at,dict(started_at=at.isoformat(),ended_at=at.isoformat(),events=[]))
+        store.save('session','sample','p001-sample',at,dict(started_at=at.isoformat(),ended_at=at.isoformat(),events=[]))
+        real=source_identity(store,'p001','real','p001-sample',manifest)
+        combined=source_identity(store,'p001','combined','p001-sample',manifest)
+        assert real['fingerprint']!=combined['fingerprint']
+        assert set(combined['source_max_seq'])=={'p001','p001-sample'}
+        before=combined['fingerprint']
+        manifest.write_text('{"version":2}')
+        assert source_identity(store,'p001','combined','p001-sample',manifest)['fingerprint']!=before
+
+
+def test_http_data_mode_defaults_validation_and_explicit_training(tmp_path):
+    store=Store(':memory:')
+    at=datetime.now(timezone.utc)-timedelta(minutes=2)
+    store.save('narrative','sample-answer','p001-sample',at,dict(
+        question=dict(kind='currentState'),question_shown_at=at.isoformat(),
+        answer=dict(free_text=json.dumps(dict.fromkeys(SCALES,3)))))
+    app=create_app(dict(ble_enabled=False,allowed_clients=['testclient'],research_models=str(tmp_path)),store)
+    with TestClient(app) as c:
+        assert c.get('/api/research/p001/overview').json()['data_mode']=='real'
+        sample=c.get('/api/research/p001/overview?data_mode=sample').json()
+        assert sample['contains_sample'] and sample['answers'][0]['kind']=='currentState'
+        assert c.get('/api/research/p001/insights?data_mode=bad').status_code==422
+        html=c.get('/research/p001').text
+        assert 'id="dataMode"' in html and 'サンプル込みの読み取り専用表示' in html
+        app.state.research.train=lambda participant,data_mode_:dict(status='called',participant=participant,data_mode=data_mode_)
+        assert c.post('/api/research/p001/train',json={'data_mode':'combined'}).json()=={
+            'status':'called','participant':'p001','data_mode':'combined'}

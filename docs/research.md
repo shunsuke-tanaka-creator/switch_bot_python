@@ -62,12 +62,34 @@ CUDA動作を実際に確認する。`deploy/ubuntu.example.json` を `server-co
 
 `GET /api/export/{participant}?after=0&limit=500` はページ形式。最初の `snapshot` を後続ページへ渡す。recordsのseqを固定し、元のIDを保持した冪等取り込みを行う。カーソルはコミット後に永続化する。機器の最新値と別名は各ページで再同期するため、recordsと完全に同一時刻のDB全体スナップショットではない。DB巻き戻りはエラーにし、カーソルを勝手にリセットしない。
 
-「全種類」はDB内の収集記録・回答・訂正・観測状態・推論・質問・提案などと機器メタデータを指す。iPhoneにしか残らない未送信ログ、OSのログ、モデル重みのファイルは含まない。モデルは `data/models/{participant}/` を別途バックアップする。エクスポート・DB・モデル重みはGit対象外。
+「全種類」はDB内の収集記録・回答・訂正・観測状態・推論・質問・提案などと機器メタデータを指す。iPhoneにしか残らない未送信ログ、OSのログ、モデル重みのファイルは含まない。モデルは `data/models/{participant}/{data_mode}/` を別途バックアップする。旧版の `data/models/{participant}/active.pt` と `status.json` は `real` の互換パスとして読み込む。エクスポート・DB・モデル重みはGit対象外。
+
+## サンプルデータとdata_mode
+
+サンプルは実participantへ書かず、`p001-sample` に保存する。投入前の確認は次のコマンドで行う。`--dry-run` はDBとmanifestを変更しない。`--include-today` は推論の1時間鮮度ゲート用に当日セッションを追加する。
+
+```sh
+.venv/bin/python -m research.cli --participant p001 generate-sample \
+  --calendar data/private/p001-calendar-tags.json \
+  --sample-participant p001-sample --dry-run --include-today
+```
+
+実投入は収集サーバーを停止してDBをバックアップした後、`--dry-run` を外して実行する。同一入力・seed・オプションは冪等で、既存manifestと入力hashまたは生成条件が異なる場合は中断する。manifestの既定先は `data/sample/p001-sample/manifest.json`。
+
+`data_mode` は `real`（対象participantのみ、既定）、`sample`（`p001-sample`のみ）、`combined`（両方を時刻順に結合）の3種類。学習例：
+
+```sh
+.venv/bin/python -m research.cli --participant p001 train --data-mode real
+.venv/bin/python -m research.cli --participant p001 train --data-mode sample
+.venv/bin/python -m research.cli --participant p001 train --data-mode combined
+```
+
+HTTPでは `GET /api/research/{participant}/overview?data_mode=...`、`GET /api/research/{participant}/insights?data_mode=...`、`POST /api/research/{participant}/train` のJSON `{"data_mode":"..."}` を使う。画面はreal以外を常時「サンプル込み」と表示し、回答・訂正・設定変更を無効にする。自動学習モードは `research_training_modes`（既定 `["real"]`）。自動質問と自動推論のparticipant列挙から `p001-sample` を除外する。
 
 ## 学習・比較評価
 
 ```sh
-.venv/bin/python -m research.cli --participant p001 train --epochs 20 --text-model /opt/models/multilingual-sentence-model
+.venv/bin/python -m research.cli --participant p001 train --data-mode real --epochs 20 --text-model /opt/models/multilingual-sentence-model
 .venv/bin/python -m research.cli --participant p001 compare --epochs 20 --text-model /opt/models/multilingual-sentence-model
 .venv/bin/python -m research.cli --participant p001 personalize --epochs 20 --text-model /opt/models/multilingual-sentence-model
 ```
@@ -94,7 +116,7 @@ CUDA動作を実際に確認する。`deploy/ubuntu.example.json` を `server-co
 
 ### この環境で確認済み
 
-- Python CPU上で18件のテスト（既存API 8件＋研究パイプライン10件）に合格。三層への勾配、未来データ不使用、日付/週境界、欠測マスク、合成データの学習・checkpoint読込、5方式の比較、逐次個人適応比較、エクスポート/冪等同期、質問間隔を確認。
+- Python CPU上で51件のテストに合格。三層への勾配、未来データ不使用、日付/週境界、欠測マスク、checkpoint読込、5方式の比較、逐次個人適応比較、エクスポート/冪等同期、質問間隔、data_mode分離、サンプル生成の決定性・冪等性、モデルパス分離を確認。
 - 旧セッションJSONLの取り込みと、状態回答不足時の学習拒否を確認。本文そのものはリポジトリへ保存していない。
 
 ### 未達・未検証（完了扱いにしない）

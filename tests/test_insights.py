@@ -209,21 +209,116 @@ def test_typing_ignores_assessments_and_preserves_zero_vs_unknown():
         np.testing.assert_array_equal(sample[k], changed[k])
 
 
-def test_typing_anomaly_requires_two_windows_and_distinct_baseline_days():
-    rows = [
-        session(AT - timedelta(days=day, minutes=10 + i * 10), corrections=2)
+def typing_window(day, inserts, rate, *, offset=0, device="phone", mode="kana"):
+    start = AT.replace(hour=10, minute=0) - timedelta(days=day) + timedelta(
+        minutes=offset
+    )
+    return dict(
+        id=f"{day}-{offset}-{device}-{mode}",
+        at=start,
+        end=start + timedelta(minutes=10),
+        inserts=inserts,
+        deletes=0,
+        correction_rate=rate,
+        delete_rate=0,
+        speed=0,
+        pause_rate=0,
+        device=device,
+        mode=mode,
+    )
+
+
+def test_typing_daily_pool_available_and_unusual():
+    windows = [
+        typing_window(day, 30, 0.01, offset=offset)
+        for day in range(2, 7)
+        for offset in (0, 10)
+    ]
+    windows += [
+        typing_window(1, 30, 0.10, offset=0),
+        typing_window(1, 30, 0.20, offset=10),
+        typing_window(0, 20, 0.20, offset=0),
+        typing_window(0, 40, 0.30, offset=10),
+    ]
+    result = typing_change(windows, AT)
+    assert result["status"] == "available"
+    assert result["unusual"]
+    assert result["baseline_days"] == 6
+    assert result["baseline_windows"] == 12
+    assert result["inserts"] == 60
+    assert result["correction_rate"] == pytest.approx(4 / 15)
+    assert result["evidence_id"] == windows[-1]["id"]
+    assert "provisional" not in result
+
+
+def test_typing_daily_pool_provisional_with_three_or_four_days():
+    for days in (3, 4):
+        windows = [typing_window(day, 50, 0.01) for day in range(1, days + 1)]
+        windows.append(typing_window(0, 50, 0.01))
+        result = typing_change(windows, AT)
+        assert result["status"] == "available"
+        assert result["baseline_days"] == days
+        assert result["provisional"] is True
+
+
+def test_typing_daily_pool_needs_three_valid_days():
+    windows = [typing_window(day, 50, 0.01) for day in (1, 2)]
+    windows.append(typing_window(0, 50, 0.01))
+    result = typing_change(windows, AT)
+    assert result == {
+        "status": "insufficient_data",
+        "unusual": False,
+        "baseline_windows": 2,
+        "baseline_days": 2,
+    }
+
+
+def test_typing_daily_pool_filters_device_and_mode():
+    windows = [typing_window(day, 50, 0.01) for day in range(1, 6)]
+    windows += [
+        typing_window(day, 500, 0.9, device="laptop")
         for day in range(1, 6)
-        for i in range(5)
     ]
-    rows += [
-        session(AT - timedelta(minutes=20), corrections=40),
-        session(AT - timedelta(minutes=10), corrections=40),
+    windows += [
+        typing_window(day, 500, 0.9, mode="romaji") for day in range(1, 6)
     ]
-    assert typing_change(typing_windows(rows, AT), AT)["unusual"]
-    assert not typing_change(typing_windows(rows[:-2] + rows[-1:], AT), AT)["unusual"]
-    assert not typing_change(typing_windows(rows, AT), AT + timedelta(hours=1))[
-        "unusual"
+    windows += [
+        typing_window(0, 500, 0.9, device="laptop"),
+        typing_window(0, 500, 0.9, mode="romaji"),
+        typing_window(0, 50, 0.01),
     ]
+    result = typing_change(windows, AT)
+    assert result["baseline_windows"] == 5
+    assert result["inserts"] == 50
+    assert result["correction_rate"] == pytest.approx(0.01)
+
+
+def test_typing_daily_pool_rejects_stale_latest_window():
+    windows = [typing_window(day, 50, 0.01) for day in range(6, 0, -1)]
+    result = typing_change(windows, AT, fresh_seconds=60)
+    assert result["status"] == "insufficient_data"
+
+
+def test_typing_daily_pool_requires_current_day_minimum():
+    windows = [typing_window(day, 50, 0.01) for day in range(5, 0, -1)]
+    windows += [typing_window(0, 20, 0.1), typing_window(0, 29, 0.1, offset=10)]
+    result = typing_change(windows, AT)
+    assert result["status"] == "insufficient_data"
+    assert result["inserts"] == 49
+
+
+def test_typing_daily_unusual_requires_current_and_previous_valid_day():
+    baseline = [typing_window(day, 50, 0.01) for day in range(2, 7)]
+    current_only = baseline + [
+        typing_window(1, 50, 0.01),
+        typing_window(0, 50, 0.2),
+    ]
+    assert not typing_change(current_only, AT)["unusual"]
+    two_days = baseline + [
+        typing_window(1, 50, 0.2),
+        typing_window(0, 50, 0.2),
+    ]
+    assert typing_change(two_days, AT)["unusual"]
 
 
 def test_fatigue_persistence_requires_coverage_and_separate_five_minute_bins():
