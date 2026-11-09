@@ -80,6 +80,10 @@ def main():
         tr=sub.add_parser(name);tr.add_argument('--models',default='data/models');tr.add_argument('--epochs',type=int,default=20);tr.add_argument('--text-model',default=None)
         tr.add_argument('--data-mode',choices=DATA_MODES,default='real');tr.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
         tr.add_argument('--sample-manifest',default=None)
+    for name in ('export-bundle','import-bundle'):
+        command=sub.add_parser(name);command.add_argument('path');command.add_argument('--models',default='data/models')
+    context=sub.add_parser('context-train');context.add_argument('--models',default='data/models');context.add_argument('--epochs',type=int,default=12)
+    context.add_argument('--text-model');context.add_argument('--device',choices=['auto','cpu','cuda','mps'],default='auto');context.add_argument('--evaluate-test',action='store_true')
     sample=sub.add_parser('generate-sample');sample.add_argument('--calendar',required=True);sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
     sample.add_argument('--manifest',default=None);sample.add_argument('--dry-run',action='store_true');sample.add_argument('--include-today',action='store_true')
     args=p.parse_args();identifier(args.participant)
@@ -90,7 +94,15 @@ def main():
         print(json.dumps(result,ensure_ascii=False,allow_nan=False));return
     store=Store(args.db)
     try:
-        if args.command=='export':result=export_all(store,args.participant,args.path)
+        if args.command in ('export-bundle','import-bundle'):
+            from .transfer import export_bundle,import_bundle
+            action=export_bundle if args.command=='export-bundle' else import_bundle
+            result=action(store,args.participant,args.models,args.path)
+        elif args.command=='context-train':
+            from .context_learning import train_context
+            result=train_context(store.rows(args.participant),Path(args.models)/args.participant/'real'/'context',datetime.now(timezone.utc),
+                                 epochs=args.epochs,text_model=args.text_model,device=args.device,evaluate_test=args.evaluate_test)
+        elif args.command=='export':result=export_all(store,args.participant,args.path)
         elif args.command=='import':result=dict(inserted=import_file(store,args.path,args.participant))
         elif args.command=='sync':
             while True:

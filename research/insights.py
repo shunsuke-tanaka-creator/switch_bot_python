@@ -4,7 +4,7 @@ from datetime import timedelta
 import numpy as np
 from .data import dt
 from .baseline import conditional, weekday_trends
-from .topology import available_rows, typing_windows, behavior_map, place_map
+from .topology import available_rows, typing_windows, behavior_map
 
 
 def fatigue_change(rows, at, base, prediction, delta_min=1.0, z_min=2.0):
@@ -157,6 +157,7 @@ class InsightEngine:
     def snapshot(self, p, at, prediction=None, rows=None, data_mode="real"):
         at = dt(at)
         rows = available_rows(self.store.rows(p) if rows is None else rows, at)
+        rows = [r for r in rows if not (r["kind"] == "research_event" and r["payload"]["kind"] == "place_visit")]
         source = [
             r
             for r in rows
@@ -207,7 +208,7 @@ class InsightEngine:
                     radius=self.config.get("pattern_radius", 0.35),
                     rows=source,
                 ),
-                places=place_map(rows, at),
+                places=dict(nodes=[],edges=[],current=None,latest=None,destination=dict(status='gps_disabled',places=[]),anomaly=None,time_anomaly=None),
                 weather=[
                     dict(
                         at=r["at"],

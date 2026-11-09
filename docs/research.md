@@ -1,5 +1,8 @@
 # 個人向け三階層LSTM — 実装・運用・未検証事項
 
+> 更新：場所分類はGPSを使わない拠点・タスク推定へ移行しました。現在の仕様・Mac運用は [behavior-context.md](behavior-context.md) を優先してください。以下のGPS訪問・場所マップの記述は旧方式です。
+
+
 ## 構成
 
 Macが既存のBLE受信とiPhoneのログ受信を継続する。UbuntuがMacの全種類エクスポートAPIを60秒ごとに差分取得し、学習・推論する。Macの `research_upstream` をUbuntuへ設定すると、質問と研究画面のAPIをUbuntuへ中継する。iPhoneの接続先はMacのままでよい。
