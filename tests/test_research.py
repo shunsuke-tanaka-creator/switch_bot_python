@@ -251,3 +251,83 @@ def test_http_data_mode_defaults_validation_and_explicit_training(tmp_path):
         app.state.research.train=lambda participant,data_mode_:dict(status='called',participant=participant,data_mode=data_mode_)
         assert c.post('/api/research/p001/train',json={'data_mode':'combined'}).json()=={
             'status':'called','participant':'p001','data_mode':'combined'}
+
+
+def typing_session(at, corrections, participant='p001-sample'):
+    events=[]
+    for i in range(100):
+        t=at+timedelta(seconds=i*2)
+        events.append(dict(type='kana',time=t.isoformat(),data={'inputMode':'ja'}))
+        if i<corrections:
+            events.append(dict(type='delete',time=(t+timedelta(seconds=1)).isoformat(),
+                               data={'target':'composition'}))
+    end=at+timedelta(minutes=5)
+    return record('session',f'{participant}-{at.date()}',end,dict(
+        session_id=f'{participant}-{at.date()}',device_id='sample-keyboard',
+        started_at=at.isoformat(),ended_at=end.isoformat(),events=events))
+
+
+def test_proposal_preview_is_read_only_in_all_modes(tmp_path):
+    with StoreContext() as store:
+        engine=Engine(store,dict(research_models=str(tmp_path)))
+        at=dt('2026-11-05T09:00:00+09:00')
+        store.save('heartbeat','real','p001',at-timedelta(minutes=1),dict(logging_enabled=True))
+        store.save('heartbeat','sample','p001-sample',at-timedelta(minutes=1),dict(logging_enabled=True))
+        before=len(store.rows('p001'))+len(store.rows('p001-sample'))
+        for value in ('real','sample','combined'):
+            preview=engine.proposal_preview('p001',value,at)
+            assert preview['preview'] and preview['data_mode']==value
+        assert len(store.rows('p001'))+len(store.rows('p001-sample'))==before
+
+
+def test_sample_typing_preview_uses_mode_evidence_only(tmp_path):
+    with StoreContext() as store:
+        engine=Engine(store,dict(research_models=str(tmp_path)))
+        at=dt('2026-11-05T09:30:00+09:00')
+        for days_ago,corrections in [(4,2),(3,2),(2,2),(1,35),(0,35)]:
+            r=typing_session(at-timedelta(days=days_ago,minutes=10),corrections)
+            store.save(r['kind'],r['id'],'p001-sample',dt(r['at']),r['payload'])
+        sample=engine.proposal_preview('p001','sample',at)
+        real=engine.proposal_preview('p001','real',at)
+        assert sample['question']['kind']=='typingReason'
+        assert real['question']['kind']!='typingReason'
+        assert engine.pending('p001-sample',at) is None
+
+
+def test_proposal_preview_reports_disabled_questions(tmp_path):
+    with StoreContext() as store:
+        engine=Engine(store,dict(research_models=str(tmp_path)))
+        at=dt('2026-11-05T09:00:00+09:00')
+        payload=dict(kind='preferences',payload=dict(questions_enabled=False))
+        store.save('research_event','off','p001',at-timedelta(minutes=1),payload)
+        preview=engine.proposal_preview('p001','sample',at)
+        assert preview['question'] is None
+        assert preview['gates']['questions_enabled']['passed'] is False
+
+
+def test_real_preview_matches_pending_without_reserving(tmp_path):
+    with StoreContext() as store:
+        engine=Engine(store,dict(research_models=str(tmp_path)))
+        at=dt('2026-11-05T09:00:00+09:00')
+        before=len(store.rows('p001'))
+        preview=engine.proposal_preview('p001','real',at)
+        assert len(store.rows('p001'))==before
+        issued=engine.pending('p001',at)
+        assert preview['question']['kind']==issued['kind']=='weatherMood'
+        assert len(store.rows('p001'))==before+1
+
+
+def test_proposal_preview_http_contract_and_validation(tmp_path,monkeypatch):
+    at=dt('2026-11-05T09:00:00+09:00')
+    monkeypatch.setattr('research.service.utc',lambda:at)
+    store=Store(':memory:')
+    app=create_app(dict(ble_enabled=False,allowed_clients=['testclient'],
+                        research_models=str(tmp_path)),store)
+    with TestClient(app) as c:
+        response=c.get('/api/research/p001/proposal-preview?data_mode=sample')
+        assert response.status_code==200
+        body=response.json()
+        assert body['preview'] and body['participant']=='p001'
+        assert body['data_mode']=='sample' and body['contains_sample']
+        assert set(body['question']) >= {'id','participantID','kind','prompt','options'}
+        assert c.get('/api/research/p001/proposal-preview?data_mode=bad').status_code==400

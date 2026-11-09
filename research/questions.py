@@ -43,38 +43,95 @@ class QuestionQueue:
         self.store = store
         self.insights = insights
 
-    def pending(self, p, at):
+    def _candidate(self, p, rows, insight, pref, at, issued_history_rows, persist):
+        """Shared selector for issuing and read-only previews.
+
+        Trigger and answer evidence comes from ``rows`` (the requested mode).
+        Pending state, budgets, gaps, intervention counts, and duplicate suppression
+        come from ``issued_history_rows`` (always the real participant history).
+        """
         at = dt(at)
+        gates = {
+            name: dict(passed=False, detail="not evaluated")
+            for name in (
+                "questions_enabled",
+                "active_hours",
+                "calendar_suppressed",
+                "already_pending",
+                "daily_budget",
+                "gap",
+                "interventions_enabled",
+                "intervention_limit",
+                "fatigue_high",
+                "fatigue_acute",
+                "typing_reason_chain",
+                "place_anomaly",
+                "followup_outcome",
+                "scheduled_kinds",
+                "scheduled_weather_mood",
+                "scheduled_current_state",
+                "scheduled_night_reflection",
+            )
+        }
+
+        def gate(name, passed, detail):
+            gates[name] = dict(passed=bool(passed), detail=detail)
+            return passed
+
+        def result(question):
+            return dict(question=question, gates=gates)
+
         # GET is an atomic reservation. Different surfaces reuse the same pending ID.
         with self.store.lock:
             rows = [
                 r
-                for r in self.store.rows(p)
+                for r in rows
                 if dt(r["at"]) <= at
                 and dt(r["payload"].get("received_at", r["at"])) <= at
             ]
-            pref = settings(rows)
-            if not pref["questions_enabled"] or not 8 <= at.hour < 24:
-                return None
+            history_rows = [
+                r
+                for r in issued_history_rows
+                if dt(r["at"]) <= at
+                and dt(r["payload"].get("received_at", r["at"])) <= at
+            ]
+            if not gate(
+                "questions_enabled",
+                pref["questions_enabled"],
+                "enabled" if pref["questions_enabled"] else "disabled by preferences",
+            ):
+                return result(None)
+            if not gate(
+                "active_hours",
+                8 <= at.hour < 24,
+                f"hour={at.hour}; active range is 08:00-24:00",
+            ):
+                return result(None)
             session = next((r for r in rows if r["kind"] == "session"), None)
             context = (session["payload"].get("context") or {}) if session else {}
             calendar_at = (context.get("measurement_updated_at") or {}).get(
                 "calendar_events"
             )
+            calendar_busy = False
             if calendar_at and timedelta(0) <= at - dt(calendar_at) <= timedelta(
                 hours=2
             ):
-                if any(
+                calendar_busy = any(
                     dt(e["start"]) <= at < dt(e["end"])
                     for e in context.get("calendar_events") or []
-                ):
-                    return None
-            issued = [r for r in rows if r["kind"] == "question_issued"]
-            answered = {r["id"] for r in rows if r["kind"] == "narrative"}
+                )
+            if not gate(
+                "calendar_suppressed",
+                not calendar_busy,
+                "active recent calendar event" if calendar_busy else "not suppressed",
+            ):
+                return result(None)
+            issued = [r for r in history_rows if r["kind"] == "question_issued"]
+            answered = {r["id"] for r in history_rows if r["kind"] == "narrative"}
             states = {}
             weather_q = set()
             reason_q = set()
-            for r in reversed(rows):
+            for r in reversed(history_rows):
                 if r["kind"] != "research_event":
                     continue
                 ev = r["payload"]
@@ -109,12 +166,15 @@ class QuestionQueue:
                     continue
                 if states.get(r["id"], ("",))[0] == "deferred":
                     if at - states[r["id"]][1] < timedelta(minutes=30):
-                        return None
-                return r["payload"]
+                        gate("already_pending", False, "pending question is deferred")
+                        return result(None)
+                gate("already_pending", False, f"reusing pending {r['payload']['kind']}")
+                return result(r["payload"])
+            gate("already_pending", True, "none")
             # Actual display counts plus live reservations bound cross-surface races.
             shown = {
                 r["payload"]["payload"]["question_id"]: dt(r["at"])
-                for r in rows
+                for r in history_rows
                 if r["kind"] == "research_event"
                 and r["payload"]["kind"] == "question_state"
                 and r["payload"]["payload"]["state"] in ("shown", "scheduled")
@@ -126,19 +186,35 @@ class QuestionQueue:
                 if dt(r["at"]).date() == at.date()
                 and (expiry(r) > at or r["id"] in done)
             } | shown.keys()
-            if len(budget) >= pref["daily_limit"]:
-                return None
+            if not gate(
+                "daily_budget",
+                len(budget) < pref["daily_limit"],
+                f"{len(budget)}/{pref['daily_limit']} used",
+            ):
+                return result(None)
             # Keep one assessment opportunity for the daily head at night.
             if (
                 at.hour < 22
                 and pref["daily_limit"] > 1
                 and len(budget) >= pref["daily_limit"] - 1
             ):
-                return None
+                gates["daily_budget"]["passed"] = False
+                gates["daily_budget"]["detail"] += "; reserved night slot"
+                return result(None)
             recent = [dt(r["at"]) for r in issued if dt(r["at"]).date() == at.date()]
-            if recent and at - max(recent) < timedelta(minutes=pref["gap_minutes"]):
-                return None
-            insight = self.insights.snapshot(p, at)
+            gap_ok = not recent or at - max(recent) >= timedelta(
+                minutes=pref["gap_minutes"]
+            )
+            if not gate(
+                "gap",
+                gap_ok,
+                "no issue today"
+                if not recent
+                else f"{int((at-max(recent)).total_seconds()//60)}m since last; requires {pref['gap_minutes']}m",
+            ):
+                return result(None)
+            if insight is None:
+                insight = self.insights.snapshot(p, at)
             fatigue, typing = insight["fatigue"], insight["typing"]
             recent_reason = next(
                 (
@@ -156,6 +232,31 @@ class QuestionQueue:
                 if r["payload"]["kind"] == "breakCheck"
                 and dt(r["at"]).date() == at.date()
             ]
+            gate(
+                "interventions_enabled",
+                pref["interventions_enabled"],
+                "enabled" if pref["interventions_enabled"] else "disabled by preferences",
+            )
+            gate(
+                "intervention_limit",
+                len(offered) < pref["intervention_limit"],
+                f"{len(offered)}/{pref['intervention_limit']} offered today",
+            )
+            gate(
+                "fatigue_high",
+                bool(fatigue.get("high")),
+                "high fatigue detected" if fatigue.get("high") else "not detected",
+            )
+            gate(
+                "fatigue_acute",
+                bool(fatigue.get("acute")),
+                "acute fatigue detected" if fatigue.get("acute") else "not detected",
+            )
+            gate(
+                "typing_reason_chain",
+                bool(typing.get("unusual") and recent_reason == "mistype"),
+                f"typing unusual={bool(typing.get('unusual'))}; recent reason={recent_reason or 'none'}",
+            )
             kind = prompt = event = None
             options = []
             ttl = 60
@@ -194,6 +295,13 @@ class QuestionQueue:
                     ]
                 )
                 break
+            gate(
+                "followup_outcome",
+                kind == "supportOutcome",
+                "eligible accepted breakCheck found"
+                if kind == "supportOutcome"
+                else "no eligible accepted breakCheck",
+            )
             if (
                 kind is None
                 and pref["interventions_enabled"]
@@ -227,6 +335,11 @@ class QuestionQueue:
                 )
             places = insight["places"]
             anomaly = places["anomaly"] or places["time_anomaly"]
+            gate(
+                "place_anomaly",
+                bool(anomaly),
+                "anomaly detected" if anomaly else "not detected",
+            )
             if kind is None and anomaly:
                 token = "outing:" + anomaly["at"]
                 if not any(r["payload"].get("eventType") == token for r in issued):
@@ -287,12 +400,40 @@ class QuestionQueue:
                         if r["payload"]["kind"] == "currentState"
                     ]
                     if previous and at - max(previous) < timedelta(hours=3):
-                        return None
+                        gate("scheduled_current_state", False, "issued within 3h")
+                        return result(None)
                 if kind == "nightReflection" and any(
                     r["payload"]["kind"] == kind for r in today
                 ):
-                    return None
+                    gate(
+                        "scheduled_night_reflection",
+                        False,
+                        "already issued today",
+                    )
+                    return result(None)
                 event = "routine_" + kind
+            gate(
+                "scheduled_kinds",
+                kind in ("weatherMood", "currentState", "nightReflection"),
+                f"selected {kind}"
+                if kind in ("weatherMood", "currentState", "nightReflection")
+                else "event-triggered candidate selected",
+            )
+            gate(
+                "scheduled_weather_mood",
+                kind == "weatherMood",
+                "selected" if kind == "weatherMood" else "not selected",
+            )
+            gate(
+                "scheduled_current_state",
+                kind == "currentState",
+                "selected" if kind == "currentState" else "not selected",
+            )
+            gate(
+                "scheduled_night_reflection",
+                kind == "nightReflection",
+                "selected" if kind == "nightReflection" else "not selected",
+            )
             q = dict(
                 id=str(uuid4()),
                 participantID=p,
@@ -316,5 +457,40 @@ class QuestionQueue:
             )
             if kind == "supportOutcome":
                 q["relatedID"] = event.split(":", 1)[1]
-            self.store.save("question_issued", q["id"], p, at, q)
-            return q
+            if persist:
+                self.store.save("question_issued", q["id"], p, at, q)
+            return result(q)
+
+    def pending(self, p, at):
+        at = dt(at)
+        with self.store.lock:
+            rows = self.store.rows(p)
+            visible = [
+                r
+                for r in rows
+                if dt(r["at"]) <= at
+                and dt(r["payload"].get("received_at", r["at"])) <= at
+            ]
+            selected = self._candidate(
+                p,
+                rows,
+                None,
+                settings(visible),
+                at,
+                rows,
+                True,
+            )
+            return selected["question"]
+
+    def preview(self, p, at, rows, insight, real_rows):
+        """Return selection and explanatory gates without saving any record."""
+        at = dt(at)
+        visible_real = [
+            r
+            for r in real_rows
+            if dt(r["at"]) <= at
+            and dt(r["payload"].get("received_at", r["at"])) <= at
+        ]
+        return self._candidate(
+            p, rows, insight, settings(visible_real), at, real_rows, False
+        )

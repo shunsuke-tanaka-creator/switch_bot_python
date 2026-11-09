@@ -232,6 +232,21 @@ class Engine:
         if p==self.sample_participant:return None
         return self.questions.pending(p,dt(at or utc()))
 
+    def proposal_preview(self,p,data_mode_='real',at=None):
+        """Preview queue selection without reserving or consuming any budget.
+
+        Mode rows drive insights and answer-dependent trigger chains, while the
+        participant's real rows exclusively drive pending/budget/gap queue state.
+        """
+        data_mode_=data_mode(data_mode_);at=dt(at or utc())
+        records=self.rows(p,data_mode_)
+        prediction=None if data_mode_=='real' else self.infer(p,at,data_mode_)
+        insight=self.insights.snapshot(p,at,prediction,records,data_mode_)
+        selected=self.questions.preview(p,at,records,insight,self.rows(p,'real'))
+        return dict(preview=True,participant=p,data_mode=data_mode_,
+                    contains_sample=data_mode_!='real' or p==self.sample_participant,
+                    at=iso(at),question=selected['question'],gates=selected['gates'])
+
     def pmtt(self,p,data_mode_='real'):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
         rows=self.rows(p,data_mode_);nodes={};edges=[]
@@ -302,6 +317,14 @@ def install(app,store,config):
         result['preferences']=question_settings(engine.rows(p,'real'))
         result['data_mode']=data_mode_;result['contains_sample']=data_mode_!='real' or p==engine.sample_participant
         return result
+
+    @app.get('/api/research/{participant}/proposal-preview')
+    async def proposal_preview(participant:str,data_mode_:str=Query('real',alias='data_mode')):
+        p=identifier(participant)
+        try:data_mode_=data_mode(data_mode_)
+        except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+        forwarded=await proxy(f'/api/research/{p}/proposal-preview?data_mode={data_mode_}')
+        return forwarded or await asyncio.to_thread(engine.proposal_preview,p,data_mode_)
 
     @app.get('/api/research/{participant}/overview')
     async def overview(participant:str,data_mode_:str=Query('real',alias='data_mode')):
