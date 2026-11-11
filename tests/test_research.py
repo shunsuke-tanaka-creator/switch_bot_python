@@ -253,7 +253,7 @@ def test_http_data_mode_defaults_validation_and_explicit_training(tmp_path):
         assert c.get('/api/research/p001/insights?data_mode=bad').status_code==422
         html=c.get('/research/p001').text
         assert 'id="dataMode"' in html and 'サンプル込みの読み取り専用表示' in html
-        app.state.research.train=lambda participant,data_mode_:dict(status='called',participant=participant,data_mode=data_mode_)
+        app.state.research.train=lambda participant,data_mode_,force=False:dict(status='called',participant=participant,data_mode=data_mode_)
         assert c.post('/api/research/p001/train',json={'data_mode':'combined'}).json()=={
             'status':'called','participant':'p001','data_mode':'combined'}
 
@@ -292,6 +292,7 @@ def test_sample_typing_preview_uses_mode_evidence_only(tmp_path):
         for days_ago,corrections in [(4,2),(3,2),(2,2),(1,35),(0,35)]:
             r=typing_session(at-timedelta(days=days_ago,minutes=10),corrections)
             store.save(r['kind'],r['id'],'p001-sample',dt(r['at']),r['payload'])
+        store.save('research_event','prefs','p001',at-timedelta(days=10),dict(kind='preferences',payload=dict(daily_limit=6)))
         sample=engine.proposal_preview('p001','sample',at)
         real=engine.proposal_preview('p001','real',at)
         assert sample['question']['kind']=='typingReason'

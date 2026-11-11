@@ -335,31 +335,6 @@ class QuestionQueue:
                     [(a["label"], "accept:" + a["action"]) for a in ranked]
                     + [("今はしない", "declined"), ("提案を停止", "stop")]
                 )
-            places = insight["places"]
-            anomaly = places["anomaly"] or places["time_anomaly"]
-            gate(
-                "place_anomaly",
-                bool(anomaly),
-                "anomaly detected" if anomaly else "not detected",
-            )
-            if kind is None and anomaly:
-                token = "outing:" + anomaly["at"]
-                if not any(r["payload"].get("eventType") == token for r in issued):
-                    kind = "outingDestination"
-                    event = token
-                    ttl = 30
-                    prompt = (
-                        "普段と違う外出の候補があります。今日はどちらへお出かけですか？"
-                    )
-                    options = opts(
-                        [
-                            ("いつもの場所", "usual"),
-                            ("新しい場所", "new_place"),
-                            ("予定変更", "changed_plan"),
-                            ("外出していない", "not_outside"),
-                            ("答えない", "declined"),
-                        ]
-                    )
             if kind is None and typing.get("unusual") and recent_reason is None:
                 token = "typing:" + typing["evidence_id"]
                 if not any(r["payload"].get("eventType") == token for r in issued):
@@ -374,7 +349,11 @@ class QuestionQueue:
                             ("わからない", "unknown"),
                         ]
                     )
-            # One shared budget/gap for all surfaces. Alternate independent axes.
+            # Four default opportunities: context, weather, current, night.
+            # Event-triggered proposals remain available with an explicitly larger budget.
+            if pref['daily_limit'] <= 4 or at.hour >= 22:
+                kind = None
+            # One shared budget/gap for all surfaces. Alternate axes across days.
             if kind is None and at.hour < 22:
                 from .context_data import catalog, fresh, summary, ident
                 if fresh(rows,at):
@@ -382,7 +361,7 @@ class QuestionQueue:
                     context_history=[r for r in issued if r["payload"]["kind"] in ("placeCheck","taskCheck")]
                     axis="task" if context_history and context_history[0]["payload"]["kind"]=="placeCheck" else "place"
                     previous=[r for r in context_history if dt(r["at"]).date()==at.date()]
-                    if len(previous)<2:
+                    if len(previous)<1:
                         kind="placeCheck" if axis=="place" else "taskCheck"
                         prompt="今いる拠点はどれですか？ 作業が変わっただけなら同じ拠点です。" if axis=="place" else "今のタスクはどれですか？ 拠点が変わっても同じ作業なら同じタスクです。"
                         event="context:"+axis
@@ -421,7 +400,7 @@ class QuestionQueue:
                         for r in today
                         if r["payload"]["kind"] == "currentState"
                     ]
-                    if previous and at - max(previous) < timedelta(hours=3):
+                    if previous and (pref['daily_limit'] <= 4 or at - max(previous) < timedelta(hours=3)):
                         gate("scheduled_current_state", False, "issued within 3h")
                         return result(None)
                 if kind == "nightReflection" and any(

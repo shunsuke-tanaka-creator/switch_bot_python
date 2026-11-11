@@ -13,7 +13,6 @@ import json
 import sys
 from datetime import datetime
 
-from bleak import BleakScanner
 
 SERVICE_UUIDS = (
     "0000fd3d-0000-1000-8000-00805f9b34fb",
@@ -37,6 +36,7 @@ def parse_contact(data):
 
 
 async def scan(args):
+    from bleak import BleakScanner
     results = {}
 
     def callback(device, advertisement):

@@ -8,7 +8,7 @@ from lifelog_server import Store, create_app
 from research.data import Timeline, dt, F
 from research.events import ResearchEvent
 from research.baseline import conditional, weekday_trends
-from research.topology import GrowingMap, typing_windows, behavior_map, place_map
+from research.topology import GrowingMap, typing_windows, behavior_map
 from research.insights import InsightEngine, fatigue_change, typing_change, recommend
 from research.questions import QuestionQueue, settings
 from research.service import export_page, ingest_page
@@ -338,80 +338,6 @@ def test_fatigue_persistence_requires_coverage_and_separate_five_minute_bins():
     )["acute"]
 
 
-def test_places_predict_destination_and_detect_unknown_without_naming():
-    t = AT.replace(hour=9, minute=30)
-    rows = []
-    for day in range(1, 8):
-        a = t - timedelta(days=day, hours=1)
-        b = a + timedelta(hours=1)
-        rows.extend(
-            [
-                event(
-                    "place_visit",
-                    f"a{day}",
-                    a,
-                    dict(place_id="place_A", phase="arrival", accuracy_m=30),
-                ),
-                event(
-                    "place_visit",
-                    f"d{day}",
-                    a + timedelta(minutes=30),
-                    dict(place_id="place_A", phase="departure", accuracy_m=30),
-                ),
-                event(
-                    "place_visit",
-                    f"b{day}",
-                    b,
-                    dict(place_id="place_B", phase="arrival", accuracy_m=30),
-                ),
-            ]
-        )
-    rows += [
-        event(
-            "place_visit",
-            "a0",
-            t - timedelta(hours=1),
-            dict(place_id="place_A", phase="arrival", accuracy_m=30),
-        ),
-        event(
-            "place_visit",
-            "d0",
-            t - timedelta(minutes=20),
-            dict(place_id="place_A", phase="departure", accuracy_m=30),
-        ),
-    ]
-    result = place_map(rows, t)
-    assert (
-        result["current"] is None
-        and result["destination"]["places"][0]["place_id"] == "place_B"
-    )
-    rows.append(
-        event(
-            "place_visit",
-            "c0",
-            t,
-            dict(place_id="place_C", phase="arrival", accuracy_m=30),
-        )
-    )
-    result = place_map(rows, t)
-    assert len(result["nodes"]) == 3 and result["anomaly"]["kind"] == "unusual_place"
-    assert (
-        place_map(
-            rows
-            + [
-                event(
-                    "place_visit",
-                    "bad",
-                    t,
-                    dict(place_id="drift", phase="arrival", accuracy_m=1000),
-                )
-            ],
-            t,
-        )["nodes"]
-        == result["nodes"]
-    )
-
-
 def test_trends_need_weeks_and_have_day_counts():
     t = dt("2026-10-29T16:00:00+09:00")
     start = dt("2026-08-03T14:00:00+09:00")
@@ -594,6 +520,7 @@ def test_typing_reason_precedes_typing_only_intervention(reason, expected):
     store = Store(":memory:")
     queue = QuestionQueue(store, Fixed())
     t = AT.replace(hour=9, minute=0)
+    put(store, [event("preferences", "prefs", t - timedelta(days=1), dict(daily_limit=6))])
     question = queue.pending("p001", t)
     assert question["kind"] == "typingReason"
     put(
@@ -631,7 +558,7 @@ def test_model_refresh_is_not_fatigue_persistence():
     assert not fatigue_change(rows, t, conditional(rows, t), prediction)["acute"]
 
 
-def test_weather_answers_do_not_trigger_state_retraining(tmp_path):
+def test_missing_checkpoint_allows_retry_even_without_new_state_labels(tmp_path):
     from research.service import Engine
 
     store = Store(":memory:")
@@ -649,5 +576,5 @@ def test_weather_answers_do_not_trigger_state_retraining(tmp_path):
             ),
         ],
     )
-    assert engine.train("p001")["status"] == "no_new_labels"
+    assert engine.train("p001")["status"] == "insufficient_labels"
     store.close()

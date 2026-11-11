@@ -198,13 +198,6 @@
       </section>
       <section>
         <h2>拠点とタスク</h2><p><a href="/research/__PARTICIPANT__/context">拠点・タスクの推定、命名・訂正、1日の振り返りを開く</a></p>
-        <p id="placeSummary"></p>
-        <p id="destination"></p>
-        <svg id="places" role="img" aria-label="場所と移動のトポロジー"></svg>
-        <div class="scroll"><table id="placeRows"></table></div>
-        <p class="muted">
-          GPSによる場所分類は停止しました。拠点とタスクは行動の流れから別々に推定します。
-        </p>
       </section>
       <section>
         <h2>自動で増える生活パターン</h2>
@@ -376,7 +369,6 @@
               "データ不足：6週間以上の観測と条件ごとの回答が必要です",
             ]);
           for (const [type, id, prefix] of [
-            ["places", "placeRows", "場所"],
             ["patterns", "patternRows", "生活"],
           ]) {
             const data = d[type];
@@ -391,30 +383,12 @@
               ]),
             );
           }
-          $("placeSummary").textContent =
-            "拠点とタスクの詳細は上のリンクから確認できます。";
           $("patternSummary").textContent =
             `生活${d.patterns.nodes.length}クラス・遷移${d.patterns.edges.length}接続。` +
             (d.patterns.nodes.length > 30
               ? "図は直近30クラス、表は全クラスを表示。"
               : "") +
             (d.patterns.at_capacity ? "上限に達しています。" : "");
-          const dest = d.places.destination;
-          $("destination").textContent =
-            dest.status === "predicted"
-              ? "次の行き先候補（未観測）：" +
-                dest.places
-                  .map(
-                    (x) =>
-                      "場所" +
-                      (d.places.nodes.findIndex((n) => n.id === x.place_id) +
-                        1) +
-                      " " +
-                      (100 * x.probability).toFixed(0) +
-                      "%",
-                  )
-                  .join(" ／ ")
-              : "";
           applyReadOnly();
         } catch (e) {
           $("error").textContent = e.message;
@@ -588,7 +562,6 @@
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
           if (snapshot) {
-            graph("places", snapshot.places, "場所");
             graph("patterns", snapshot.patterns, "生活");
           }
         }, 150);

@@ -1,0 +1,16 @@
+name: Validate (manual)
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-dev.txt -r requirements-ml.txt
+      - run: python -B -m unittest discover -s tests -p test_audit_regressions.py -v
+      - run: python -m pytest -q

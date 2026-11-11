@@ -8,10 +8,11 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-import sqlite3
-import threading
-from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+from lifelog.store import Store
+from lifelog.time import now, stamp, parsed
+from lifelog.ble import collect_ble
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -20,8 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 ROOT = Path(__file__).resolve().parent
 JST = ZoneInfo("Asia/Tokyo")
 DEFAULTS = {
-    "host": "100.106.185.3", "port": 8000, "participant_id": "p001",
-    "allowed_clients": ["100.124.206.1", "100.106.185.3", "127.0.0.1", "::1"],
+    "host": "127.0.0.1", "port": 8000, "participant_id": "p001",
+    "allowed_clients": ["127.0.0.1", "::1"],
     "database": "data/lifelog.sqlite3", "ble_enabled": True,
     "stale_seconds": 120, "devices": {},
 }
@@ -29,18 +30,6 @@ ACTIVITIES = dict(zip(
     "desk_work meeting study cooking cleaning laundry shopping meal bath toilet dressing relax nap sleep_prep video game reading sns walk commute errand family friends call".split(),
     "デスクワーク 会議・打合せ 勉強・研究 料理 掃除 洗濯 買い物 食事 入浴 トイレ 身支度 くつろぎ 仮眠 就寝準備 テレビ・動画 ゲーム 読書 スマホ・SNS 散歩 通勤・通学 用事 家族と 友人と 通話".split()))
 EVENT_LABELS = {"wake_up": "起床", "outing": "外出（記録）", "return_home": "帰宅（記録）", "sleep": "就寝（記録）", "door_open": "ドアが開いた", "door_close": "ドアが閉じた"}
-
-
-def now():
-    return datetime.now(timezone.utc)
-
-
-def stamp(value):
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds")
-
-
-def parsed(value):
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class Event(BaseModel):
@@ -100,6 +89,8 @@ class Session(TimedEvent):
                 raise ValueError("event time outside session")
             if not isinstance(event.get("type"), str) or not isinstance(event.get("data"), dict):
                 raise ValueError("invalid session event")
+            if event["type"] == "commit" and any(not isinstance(event["data"].get(k, ""), str) for k in ("text", "replaces")):
+                raise ValueError("commit text/replaces must be strings")
         return self
 
 
@@ -141,75 +132,6 @@ def activity_label(payload):
     return ACTIVITIES.get(label, label)
 
 
-class Store:
-    def __init__(self, path):
-        self.lock = threading.RLock()
-        if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path), check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
-        self.db.executescript("""
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS records (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT, participant TEXT NOT NULL,
-                kind TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, payload TEXT NOT NULL,
-                UNIQUE(participant, kind, id));
-            CREATE INDEX IF NOT EXISTS records_day ON records(participant, at);
-            CREATE TABLE IF NOT EXISTS device_names (
-                participant TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL,
-                PRIMARY KEY(participant, id));
-            CREATE TABLE IF NOT EXISTS devices (
-                participant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
-                PRIMARY KEY(participant, id));
-        """)
-        self.db.commit()
-
-    def save(self, kind, identifier, participant, at, payload):
-        with self.lock, self.db:
-            cur = self.db.execute("INSERT OR IGNORE INTO records(participant,kind,id,at,payload) VALUES(?,?,?,?,?)",
-                                  (participant, kind, identifier, stamp(at), json.dumps(payload, ensure_ascii=False)))
-            return cur.rowcount == 1
-
-    def contact(self, participant, identifier, name, state, received_at, rssi):
-        with self.lock, self.db:
-            row = self.db.execute("SELECT payload FROM devices WHERE participant=? AND id=?", (participant, identifier)).fetchone()
-            previous = json.loads(row[0]) if row else None
-            alias = self.db.execute("SELECT name FROM device_names WHERE participant=? AND id=?", (participant, identifier)).fetchone()
-            payload = dict(state, device_id=identifier, name=alias[0] if alias else name, last_seen=stamp(received_at), rssi=rssi)
-            self.db.execute("INSERT OR REPLACE INTO devices VALUES(?,?,?)", (participant, identifier, json.dumps(payload)))
-            observation_id = identifier + ":" + received_at.strftime("%Y%m%d%H%M")
-            self.save("switchbot_observation", observation_id, participant, received_at, payload)
-            if previous is None or previous["state"] != state["state"]:
-                payload["initial_observation"] = previous is None
-                self.save("switchbot", str(uuid4()), participant, received_at, payload)
-
-    def rows(self, participant, start=None, end=None, snapshot=None):
-        where, params = ["participant=?"], [participant]
-        for clause, value in [("at>=?", stamp(start) if start else None), ("at<?", stamp(end) if end else None), ("seq<=?", snapshot)]:
-            if value is not None:
-                where.append(clause)
-                params.append(value)
-        with self.lock:
-            rows = self.db.execute("SELECT * FROM records WHERE " + " AND ".join(where) + " ORDER BY at DESC,seq DESC", params).fetchall()
-        return [dict(row, payload=json.loads(row["payload"])) for row in rows]
-
-    def devices(self, participant, config, at):
-        with self.lock:
-            rows = self.db.execute("SELECT payload FROM devices WHERE participant=?", (participant,)).fetchall()
-        result = []
-        for row in rows:
-            p = json.loads(row[0])
-            p["stale"] = (at - parsed(p["last_seen"])).total_seconds() > config["stale_seconds"]
-            result.append(p)
-        for identifier, spec in config["devices"].items():
-            if spec.get("participant_id", config["participant_id"]) == participant and not any(p["device_id"].lower() == identifier.lower() for p in result):
-                result.append(dict(device_id=identifier, name=spec.get("name", identifier), state="unknown", battery=None, last_seen=None, rssi=None, stale=True))
-        return sorted(result, key=lambda d: d["name"])
-
-    def close(self):
-        self.db.close()
-
-
 def timeline_item(row):
     p, kind = row["payload"], row["kind"]
     detail = ""
@@ -248,49 +170,6 @@ def current_activity(rows, at):
         return dict(label="現在の活動は不明", source="情報不足", evidence="最近の活動回答・打鍵記録がありません。ドアの開閉だけでは在宅・外出を断定できません。", observed_at=None)
     t, label, source, evidence = max(candidates, key=lambda x: x[0])
     return dict(label=label, source=source, evidence=evidence, observed_at=stamp(t))
-
-
-async def collect_ble(store, config, status):
-    from bleak import BleakScanner
-    from switchbot_contact_ble import SERVICE_UUIDS, parse_contact
-    last_saved = {}
-
-    def callback(device, advertisement):
-        configured = {k.lower(): v for k, v in config["devices"].items()}
-        if configured and device.address.lower() not in configured:
-            return
-        for uuid in SERVICE_UUIDS:
-            state = parse_contact(advertisement.service_data.get(uuid, b""))
-            if state is None:
-                continue
-            t = now()
-            previous = last_saved.get(device.address)
-            if previous and previous[1] == state and (t - previous[0]).total_seconds() < 10:
-                return
-            spec = configured.get(device.address.lower(), {})
-            try:
-                store.contact(spec.get("participant_id", config["participant_id"]), device.address,
-                              spec.get("name", device.name or "SwitchBot 開閉センサー"), state, t, advertisement.rssi)
-                last_saved[device.address] = (t, state)
-                status.update(state="scanning", error=None, last_received_at=stamp(t))
-            except Exception:
-                logging.exception("Could not persist BLE observation")
-                status.update(state="error", error="センサーデータの保存に失敗しました")
-            return
-
-    while True:
-        try:
-            status.update(state="starting", error=None)
-            async with BleakScanner(callback, scanning_mode="active"):
-                status.update(state="scanning", error=None)
-                while True:
-                    await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logging.warning("BLE scanner: %s", exc)
-            status.update(state="error", error=str(exc))
-            await asyncio.sleep(10)
 
 
 def create_app(config=None, store=None):
@@ -342,23 +221,23 @@ def create_app(config=None, store=None):
     @app.post("/api/narrative-events")
     def narratives(payload: Narrative | list[Narrative]):
         items = payload if isinstance(payload, list) else [payload]
-        return dict(inserted=sum(store.save("narrative", p.event_id, p.participant_id, p.answered_at or p.detected_at, p.model_dump(mode="json")) for p in items))
+        return dict(inserted=sum(store.save("narrative", p.event_id, p.participant_id, p.answered_at or p.detected_at, dict(p.model_dump(mode="json"), received_at=stamp(now()))) for p in items))
 
     @app.post("/api/context-events")
     def contexts(payload: Context):
-        return dict(inserted=store.save("context", payload.event_id, payload.participant_id, payload.detected_at, payload.model_dump(mode="json")))
+        return dict(inserted=store.save("context", payload.event_id, payload.participant_id, payload.detected_at, dict(payload.model_dump(mode="json"), received_at=stamp(now()))))
 
     @app.post("/api/sensor-events")
     def sensors(payload: Sensor):
         # Compatibility with the old in-app simulator. Never impersonate BLE devices.
         p = payload.model_dump(mode="json")
         identifier = hashlib.sha256(json.dumps(p, sort_keys=True).encode()).hexdigest()
-        return dict(inserted=store.save("sensor", identifier, payload.participant_id, payload.occurred_at, p))
+        return dict(inserted=store.save("sensor", identifier, payload.participant_id, payload.occurred_at, dict(p, received_at=stamp(now()))))
 
     @app.post("/api/activities")
     def activities(payload: Activity):
         p = dict(event_id=payload.event_id, participant_id=payload.participant_id, detected_at=stamp(payload.occurred_at), answered_at=stamp(payload.occurred_at),
-                 question={"kind": "activityCheck", "prompt": "今、何をしていますか？"}, answer={"free_text": payload.label}, source="parent_app")
+                 question={"kind": "activityCheck", "prompt": "今、何をしていますか？"}, answer={"free_text": payload.label}, source="parent_app", received_at=stamp(now()))
         return dict(inserted=store.save("narrative", payload.event_id, payload.participant_id, payload.occurred_at, p))
 
     @app.get("/api/questions/pending/{participant_id}")

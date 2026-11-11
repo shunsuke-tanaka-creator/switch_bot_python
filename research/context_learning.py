@@ -10,8 +10,10 @@ import os
 import random
 import numpy as np
 import torch
-from .data import BASE, F, FEATURES, TEXT_DIM, Timeline, dt
-from .train import atomic_json, normalization, batch
+from .data import BASE, F, FEATURES, TEXT_DIM, Timeline, dt, LazySample
+from .io import atomic_json
+from .train import normalization, batch
+from .provenance import experiment_id, run_metadata
 from .context_data import (
     AXES,
     VERSION,
@@ -146,11 +148,16 @@ def train_context(
     text_model=None,
     device="auto",
     evaluate_test=False,
+    force=False,
 ):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     at = dt(at)
     fp = fingerprint(rows)
+    from .text import encoder_identity
+    run_id = experiment_id(fp, dict(version=VERSION,epochs=epochs,hidden=hidden,device=device,
+                            text_identity=encoder_identity(text_model) if text_model else 'character-ngram-v1',
+                            rolling_hour=at.replace(minute=0,second=0,microsecond=0).isoformat()))
     with (directory / "training.lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -160,7 +167,9 @@ def train_context(
         if status_path.exists():
             previous = json.loads(status_path.read_text())
             if (
-                previous.get("fingerprint") == fp
+                not force
+                and (directory / "active.pt").exists()
+                and previous.get("experiment_id") == run_id
                 and previous.get("text_model") == text_model
                 and not evaluate_test
             ):
@@ -181,6 +190,7 @@ def train_context(
             version=VERSION,
             annotation_fingerprint=annotation_fingerprint(rows),
             fingerprint=fp,
+            experiment_id=run_id,
             text_model=text_model,
             windows=len(times),
             days=len(dates),
@@ -249,7 +259,7 @@ def train_context(
             examples.append(
                 dict(
                     at=t,
-                    sample=timeline.sample(t),
+                    sample=LazySample(timeline,t),
                     labels=ids,
                     target=target,
                     mask=mask,
@@ -288,8 +298,9 @@ def train_context(
                 for a in AXES:
                     loss = loss + relation_loss(out[a], [e["labels"][a] for e in chunk])
                 optimizer.zero_grad()
+                if not torch.isfinite(loss): raise ValueError("Non-finite context loss")
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1, error_if_nonfinite=True)
                 optimizer.step()
             model.eval()
             total = denom = 0
@@ -300,7 +311,11 @@ def train_context(
                     mask = torch.tensor(e["mask"], device=dev)
                     total += float(((out["next"][0] - target).square() * mask).sum())
                     denom += float(mask.sum())
-            score = total / max(denom, 1)
+            if denom == 0:
+                report.update(status="insufficient_validation", validation_target_count=0)
+                atomic_json(status_path,report)
+                return report
+            score = total / denom
             if score < best_loss:
                 best_loss = score
                 best = copy.deepcopy(model.state_dict())
@@ -399,6 +414,12 @@ def train_context(
                             matches.append(e["at"])
                     node["count"] = len(matches)
                     node["days"] = len({t.date() for t in matches})
+        # Metrics use the identical prototype set that will be served at inference.
+        report['validation'] = evaluate(model,va,proto,dev,mean,std)
+        report['test'] = evaluate(model,te,proto,dev,mean,std) if evaluate_test else None
+        report['run'] = run_metadata(37,epochs,dict(hidden=hidden,optimizer='AdamW',lr=.002,batch_size=8,version=VERSION),
+                    {name:[e['at'].isoformat() for e in items] for name,items in [('train',tr),('validation',va),('test',te)]})
+        atomic_json(directory/'run.json',report['run'])
         checkpoint = dict(
             version=VERSION,
             features=FEATURES,
@@ -412,6 +433,9 @@ def train_context(
         )
         temp = directory / "active.tmp"
         torch.save(checkpoint, temp)
+        if (directory / 'active.pt').exists():
+            import shutil
+            shutil.copy2(directory / 'active.pt',directory / 'previous.pt')
         os.replace(temp, directory / "active.pt")
         atomic_json(status_path, report)
         return report
