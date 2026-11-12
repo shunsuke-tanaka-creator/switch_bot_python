@@ -9,7 +9,7 @@
 | requirements.lock.txt | 旧収集環境の固定版＋不足numpy、Darwinのpyobjc marker | 全OSを解決した完全lockではない |
 | requirements-dev.lock.txt | 旧環境の固定pytestと関連依存 | 新しい検証環境では使用しない。既存利用の互換性のため保持 |
 
-検証環境はLinux x86_64、Python 3.12.14、PyTorch 2.15.0+cpu、numpy 2.5.4、pytest 9.2.0、SentenceTransformers 5.7.0です。既存の本番環境は更新していません。`pip check` は依存矛盾なし。CPUの固定版をmacOSやCUDAへ流用せず、それぞれ独立したvenvで検証してください。CUDA版PyTorchは[公式](https://pytorch.org/get-started/locally/)で環境に合うものを選びます。
+検証環境はLinux x86_64、Python 3.12.14、PyTorch 2.15.0+cpu、numpy 2.5.4、pytest 9.2.0、SentenceTransformers 5.7.0です。同じ依存でGitHub ActionsのUbuntu 24.04 / Python 3.12.16も88テスト成功しました。既存の本番環境は更新していません。`pip check` は依存矛盾なし。CPUの固定版をmacOSやCUDAへ流用せず、それぞれ独立したvenvで検証してください。CUDA版PyTorchは[公式](https://pytorch.org/get-started/locally/)で環境に合うものを選びます。
 
 ## Linux CPUで検証環境を再現する
 

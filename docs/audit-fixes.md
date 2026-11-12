@@ -16,7 +16,7 @@
 
 削除判断が不十分な外部公開APIやモデルheadは一律削除していません。旧サンプルCLIは処理を停止して新generatorを案内する互換入口とし、危険な旧DB直接書込をなくしました。チェックポイントのparameter keyを変える最適化は実測後の課題です。
 
-2026-11-12追検証：承認後に専用venvへ収集・ML・テスト依存を導入。CPUで88テスト（軽量15件を含む）が成功しました。合成データによる短い学習、held-out評価、オンライン個人化、Checkpoint保存・復元、APIを含みます。追加したローカル文章モデルの保存・再読み込み・移動・キャッシュ失効も成功しました（外部重み取得なし）。Python AST、JSON/YAML、シェル構文、両repoの共通fixture照合、diff確認も実施。PRごとのCPU CIを追加しました。
+2026-11-12追検証：承認後に専用venvへ収集・ML・テスト依存を導入。CPUで88テスト（軽量15件を含む）が成功しました。合成データによる短い学習、held-out評価、オンライン個人化、Checkpoint保存・復元、APIを含みます。追加したローカル文章モデルの保存・再読み込み・移動・キャッシュ失効も成功しました（外部重み取得なし）。Python AST、JSON/YAML、シェル構文、両repoの共通fixture照合、diff確認も実施。PRごとのCPU CIを追加し、[GitHub Actions](https://github.com/shunsuke-tanaka-creator/switch_bot_python/actions/runs/43191910241)（Ubuntu 24.04 / Python 3.12.16）でも88件成功しました。ActionはNode 24対応版のcommitへ固定しています。
 
 未実施：実データ学習、実運用Checkpoint・事前学習済み文章モデルの互換性、GPU/MPS、Mac/iOS実接続。旧macOS固定依存の再解決は実施していません。
 
