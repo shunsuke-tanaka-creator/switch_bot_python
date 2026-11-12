@@ -130,7 +130,7 @@ v2特徴はevent timeで5分binへ配置し、**予測時刻までに収集サ�
 
 ## 検証範囲
 
-今回実行したのは軽量回帰テストと構文/設定チェックです。既存のPyTorchテスト、実データ学習、推定精度、SentenceTransformer実重み、CUDA/MPS、Mac BLE、iOSとの実接続は未実行です。[依存](dependencies.md)、[変更一覧](audit-fixes.md)を参照してください。精度・速度・メモリの改善量は未測定です。
+2026-11-12にLinux CPUの専用venvで、軽量回帰を含む88テストと構文/設定チェックが成功しました。合成データでの短い学習・評価・Checkpoint復元・オンライン個人化を含みます。実データ学習、推定精度、SentenceTransformer実運用重み、CUDA/MPS、Mac BLE、iOSとの実接続は未実行です。[依存](dependencies.md)、[変更一覧](audit-fixes.md)を参照してください。精度・速度・メモリの改善量は未測定です。
 
 ```sh
 python -B -m unittest discover -s tests -p test_audit_regressions.py -v

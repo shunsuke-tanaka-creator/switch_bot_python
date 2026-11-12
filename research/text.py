@@ -40,7 +40,8 @@ class LocalEncoder:
         from sentence_transformers import SentenceTransformer
         self.model=SentenceTransformer(str(root),device='cpu',local_files_only=True,trust_remote_code=False)
         self.identity=encoder_identity(root)
-        dims=self.model.get_sentence_embedding_dimension()
+        dimension = getattr(self.model, 'get_embedding_dimension', None)
+        dims = dimension() if dimension is not None else self.model.get_sentence_embedding_dimension()
         self.projection=np.random.default_rng(17).normal(size=(dims,TEXT_DIM)).astype(np.float32)/np.sqrt(TEXT_DIM)
 
     @lru_cache(maxsize=10000)
