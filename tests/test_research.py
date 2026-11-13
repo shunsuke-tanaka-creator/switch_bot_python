@@ -282,6 +282,8 @@ def test_proposal_preview_is_read_only_in_all_modes(tmp_path):
         for value in ('real','sample','combined'):
             preview=engine.proposal_preview('p001',value,at)
             assert preview['preview'] and preview['data_mode']==value
+            # 追加: previewで歩数検出器の抑止理由・段階を読み取り専用確認できる。
+            assert preview['exercise']['status']=='insufficient_data'
         assert len(store.rows('p001'))+len(store.rows('p001-sample'))==before
 
 
@@ -335,5 +337,6 @@ def test_proposal_preview_http_contract_and_validation(tmp_path,monkeypatch):
         body=response.json()
         assert body['preview'] and body['participant']=='p001'
         assert body['data_mode']=='sample' and body['contains_sample']
+        assert 'exercise' in body
         assert set(body['question']) >= {'id','participantID','kind','prompt','options'}
         assert c.get('/api/research/p001/proposal-preview?data_mode=bad').status_code==400

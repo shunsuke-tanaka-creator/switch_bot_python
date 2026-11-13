@@ -408,7 +408,9 @@ class QuestionQueue:
                 )
                 prompt = (
                     f"{condition}の普段より、同時刻までの歩数が"
-                    f"{exercise['shortage_steps']}歩少なめです。運動候補を選びますか？"
+                    f"{exercise['shortage_steps']}歩少なめです。"
+                    f"100歩/分の歩行相当で約{exercise['walking_equivalent_minutes']:g}分です。"
+                    "運動候補を選びますか？"
                 )
                 options = opts(
                     [
@@ -424,16 +426,23 @@ class QuestionQueue:
                 pmtt = dict(
                     condition=exercise_context,
                     usual_steps=exercise["usual_steps"],
+                    lower_quartile_steps=exercise["lower_quartile_steps"],
                     today_steps=exercise["today_steps"],
                     shortage_steps=exercise["shortage_steps"],
+                    minimum_shortage_steps=exercise["minimum_shortage_steps"],
+                    minimum_shortage_fraction=exercise[
+                        "minimum_shortage_fraction"
+                    ],
                     cadence_steps_per_minute=exercise["cadence_steps_per_minute"],
                     walking_equivalent_minutes=exercise[
                         "walking_equivalent_minutes"
                     ],
                     baseline_days=exercise["baseline_days"],
+                    baseline_stage=exercise["baseline_stage"],
                     provisional=exercise["provisional"],
                     candidates=exercise["candidates"],
                     evidence_id=exercise["evidence_id"],
+                    carry_evidence_id=exercise["carry_evidence_id"],
                 )
             if kind is None and typing.get("unusual") and recent_reason is None:
                 token = "typing:" + typing["evidence_id"]
@@ -451,9 +460,7 @@ class QuestionQueue:
                     )
             # Four default opportunities: context, weather, current, night.
             # Event-triggered proposals remain available with an explicitly larger budget.
-            if kind != "exerciseProposal" and (
-                pref['daily_limit'] <= 4 or at.hour >= 22
-            ):
+            if pref['daily_limit'] <= 4 or at.hour >= 22:
                 kind = None
             # One shared budget/gap for all surfaces. Alternate axes across days.
             if kind is None and at.hour < 22:

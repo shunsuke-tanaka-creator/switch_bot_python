@@ -41,8 +41,12 @@ def persist_step_snapshot(store, participant, session_id, payload, fresh_seconds
     steps = context.get("step_count")
     if measured_at is None or type(steps) not in (int, float) or not math.isfinite(steps):
         return False
-    measured_at = dt(measured_at)
-    ended_at = dt(payload["ended_at"])
+    # 追加: 任意Contextの不正な時刻で、保存済みセッションのAPI応答を失敗させない。
+    try:
+        measured_at = dt(measured_at)
+        ended_at = dt(payload["ended_at"])
+    except (TypeError, ValueError, AttributeError):
+        return False
     if steps < 0 or not timedelta(0) <= ended_at - measured_at <= timedelta(
         seconds=fresh_seconds
     ):
@@ -64,6 +68,7 @@ def persist_step_snapshot(store, participant, session_id, payload, fresh_seconds
             session_at=ended_at.isoformat(),
             source_session_id=session_id,
             place_id=place_id,
+            device_id=payload.get("device_id"),
             received_at=payload.get("received_at", ended_at.isoformat()),
         ),
     )
@@ -77,7 +82,7 @@ def step_observations(
     context_rows = [r for r in visible if r["kind"] == "context_inference"]
     from .context_data import catalog, resolve
 
-    _, aliases = catalog(visible, at)
+    classes, aliases = catalog(visible, at)
 
     def inferred_place(measured_at, participant):
         candidates = [
@@ -98,12 +103,19 @@ def step_observations(
     for r in visible:
         payload = r["payload"]
         if r["kind"] == "step_snapshot":
-            measured_at = dt(payload["measurement_at"])
-            session_at = dt(payload["session_at"])
-            steps = payload["step_count"]
+            steps = payload.get("step_count")
+            if type(steps) not in (int, float) or not math.isfinite(steps) or steps < 0:
+                continue
+            # 追加: 旧・外部レコードの不正な任意時刻は観測だけ除外する。
+            try:
+                measured_at = dt(payload["measurement_at"])
+                session_at = dt(payload["session_at"])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
             source_id = payload["source_session_id"]
             place_id = payload.get("place_id")
             place_name = None
+            device_id = payload.get("device_id")
             explicit = True
         elif r["kind"] == "session":
             context = payload.get("context") or {}
@@ -116,9 +128,14 @@ def step_observations(
                 or steps < 0
             ):
                 continue
-            measured_at = dt(measured)
-            session_at = dt(payload["ended_at"])
+            # 追加: 保存済みセッション内の不正な任意時刻でpreviewを失敗させない。
+            try:
+                measured_at = dt(measured)
+                session_at = dt(payload["ended_at"])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
             source_id = payload.get("session_id", r["id"])
+            device_id = payload.get("device_id")
             place = context.get("place")
             place_id = (
                 context.get("place_id")
@@ -137,6 +154,8 @@ def step_observations(
             continue
         if place_id:
             place_id = resolve(aliases["place"], place_id)
+            # 追加: 保存時に名称がなくても、現在の拠点カタログから表示名を解決する。
+            place_name = place_name or classes["place"].get(place_id, {}).get("name")
         else:
             place_id, place_name = inferred_place(
                 measured_at, r.get("participant")
@@ -147,6 +166,7 @@ def step_observations(
             steps=float(steps),
             source_id=source_id,
             participant=r.get("participant"),
+            device_id=device_id,
             place_id=place_id,
             place_name=place_name,
         )
@@ -193,11 +213,46 @@ def step_shortage(
         )
     place_id = current["place_id"]
     basis = "weekday_place_time" if place_id else "weekday_time_fallback"
+    context = dict(
+        basis=basis,
+        weekday=at.weekday(),
+        weekday_name=("月", "火", "水", "木", "金", "土", "日")[
+            at.weekday()
+        ]
+        + "曜日",
+        place_id=place_id,
+        place_name=current["place_name"],
+        time=at.strftime("%H:%M"),
+    )
+    # 追加: 当日の別スナップショットから歩数増加を確認し、未携帯と区別できない日は抑止する。
+    progress = next(
+        (
+            value
+            for value in reversed(observations)
+            if value["participant"] == current["participant"]
+            and value["at"].date() == today
+            and value["at"] < current["at"]
+            and value["steps"] < current["steps"]
+        ),
+        None,
+    )
+    if progress is None:
+        return dict(
+            status="insufficient_data",
+            low=False,
+            reason="device_carry_not_observed",
+            today_steps=int(round(current["steps"])),
+            context=context,
+        )
     target_seconds = at.hour * 3600 + at.minute * 60 + at.second
     days = {}
     for value in observations:
         date = value["at"].date()
-        if date >= today or value["at"].weekday() != at.weekday():
+        if (
+            value["participant"] != current["participant"]
+            or date >= today
+            or value["at"].weekday() != at.weekday()
+        ):
             continue
         if place_id and value["place_id"] != place_id:
             continue
@@ -210,17 +265,6 @@ def step_shortage(
             days[date] = value
     baseline = [value["steps"] for _, value in sorted(days.items())]
     baseline_days = len(baseline)
-    context = dict(
-        basis=basis,
-        weekday=at.weekday(),
-        weekday_name=("月", "火", "水", "木", "金", "土", "日")[
-            at.weekday()
-        ]
-        + "曜日",
-        place_id=place_id,
-        place_name=current["place_name"],
-        time=at.strftime("%H:%M"),
-    )
     if baseline_days < provisional_days:
         return dict(
             status="insufficient_data",
@@ -242,17 +286,21 @@ def step_shortage(
         status="available",
         low=low,
         provisional=baseline_days < formal_days,
+        baseline_stage="provisional" if baseline_days < formal_days else "formal",
         baseline_days=baseline_days,
         context=context,
         usual_steps=int(round(usual)),
         lower_quartile_steps=int(round(lower_quartile)),
         today_steps=int(round(current["steps"])),
         shortage_steps=shortage,
+        minimum_shortage_steps=minimum_shortage_steps,
+        minimum_shortage_fraction=minimum_shortage_fraction,
         cadence_steps_per_minute=100,
         walking_equivalent_minutes=round(shortage / 100, 1),
         candidates=exercise_candidates(shortage) if low else [],
         evidence_id=current["source_id"],
-        note="research threshold; fresh session-backed cumulative steps, not device-carry proof",
+        carry_evidence_id=progress["source_id"],
+        note="research threshold; fresh session-backed cumulative steps with same-day progress",
     )
     return result
 

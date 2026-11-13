@@ -195,9 +195,11 @@ class Engine:
         prediction=None if data_mode_=='real' else self.infer(p,at,data_mode_)
         insight=self.insights.snapshot(p,at,prediction,records,data_mode_)
         selected=self.questions.preview(p,at,records,insight,self.rows(p,'real'))
+        # 追加: 既存preview契約を維持し、歩数検出器の段階・閾値・抑止理由を確認可能にする。
         return dict(preview=True,participant=p,data_mode=data_mode_,
                     contains_sample=data_mode_!='real' or p==self.sample_participant,
-                    at=iso(at),question=selected['question'],gates=selected['gates'])
+                    at=iso(at),question=selected['question'],gates=selected['gates'],
+                    exercise=insight.get('exercise'))
 
     def pmtt(self,p,data_mode_='real'):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.

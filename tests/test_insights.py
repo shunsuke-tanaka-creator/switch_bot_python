@@ -93,7 +93,15 @@ def session(at, n=120, corrections=0, purpose=None, device="phone"):
 
 
 # 追加: 参加者の入力原文を含まない、日累積歩数だけの合成セッション。
-def step_session(at, steps, *, place_id=None, measurement_at=None, identifier=None):
+def step_session(
+    at,
+    steps,
+    *,
+    place_id=None,
+    measurement_at=None,
+    identifier=None,
+    participant="p001",
+):
     measured = measurement_at or at - timedelta(minutes=1)
     context = dict(
         step_count=steps,
@@ -101,7 +109,7 @@ def step_session(at, steps, *, place_id=None, measurement_at=None, identifier=No
     )
     if place_id:
         context["place_id"] = place_id
-    return record(
+    result = record(
         "session",
         identifier or f"steps-{at.isoformat()}-{place_id}",
         at,
@@ -114,6 +122,9 @@ def step_session(at, steps, *, place_id=None, measurement_at=None, identifier=No
             context=context,
         ),
     )
+    # 追加: 複数参加者を混在させた基準分離テストに使う。
+    result["participant"] = participant
+    return result
 
 
 def put(store, rows):
@@ -385,6 +396,15 @@ def test_step_shortage_uses_weekday_place_time_context():
         )
         for week in range(1, 6)
     ]
+    # 追加: 当日の歩数増加で端末未携帯との区別に必要な観測を作る。
+    rows.append(
+        step_session(
+            at - timedelta(hours=1),
+            800,
+            place_id="place_lab",
+            identifier="today-progress",
+        )
+    )
     rows.append(step_session(at, 1000, place_id="place_lab", identifier="today"))
     result = step_shortage(rows, at)
     assert result["status"] == "available" and result["low"]
@@ -408,13 +428,30 @@ def test_step_shortage_falls_back_only_when_current_place_is_unknown():
         for week in range(1, 6)
     ]
     fallback = step_shortage(
-        history + [step_session(at, 1000, identifier="today-unknown")], at
+        history
+        + [
+            step_session(
+                at - timedelta(hours=1), 800, identifier="fallback-progress"
+            ),
+            step_session(at, 1000, identifier="today-unknown"),
+        ],
+        at,
     )
     assert fallback["status"] == "available" and fallback["low"]
     assert fallback["context"]["basis"] == "weekday_time_fallback"
     known = step_shortage(
         history
-        + [step_session(at, 1000, place_id="place_lab", identifier="today-known")],
+        + [
+            step_session(
+                at - timedelta(hours=1),
+                800,
+                place_id="place_lab",
+                identifier="known-progress",
+            ),
+            step_session(
+                at, 1000, place_id="place_lab", identifier="today-known"
+            ),
+        ],
         at,
     )
     assert known["status"] == "insufficient_data"
@@ -439,6 +476,94 @@ def test_step_shortage_rejects_stale_measurements():
     result = step_shortage(rows, at)
     assert result["status"] == "insufficient_data"
     assert result["reason"] == "current_step_measurement_missing_or_stale"
+
+
+# 追加: 当日の歩数増加がなく端末未携帯と区別できない場合は提案判定しない。
+def test_step_shortage_requires_same_day_step_progress():
+    at = dt("2026-11-09T16:00:00+09:00")
+    history = [
+        step_session(
+            at - timedelta(days=7 * week, minutes=5),
+            3000,
+            place_id="place_lab",
+        )
+        for week in range(1, 6)
+    ]
+    result = step_shortage(
+        history
+        + [step_session(at, 1000, place_id="place_lab", identifier="today")],
+        at,
+    )
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "device_carry_not_observed"
+
+
+# 追加: combined表示でも別参加者の歩数を本人の通常値へ混ぜない。
+def test_step_shortage_does_not_mix_participants():
+    at = dt("2026-11-09T16:00:00+09:00")
+    other_history = [
+        step_session(
+            at - timedelta(days=7 * week, minutes=5),
+            4000,
+            place_id="place_lab",
+            participant="p002",
+        )
+        for week in range(1, 6)
+    ]
+    result = step_shortage(
+        other_history
+        + [
+            step_session(
+                at - timedelta(hours=1),
+                800,
+                place_id="place_lab",
+                identifier="progress",
+            ),
+            step_session(at, 1000, place_id="place_lab", identifier="today"),
+        ],
+        at,
+    )
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "context_baseline_too_short"
+    assert result["baseline_days"] == 0
+
+
+# 追加: セッションに拠点がなくても、同時刻のContextLSTM確定拠点を条件に使う。
+def test_step_shortage_uses_context_inference_place():
+    at = dt("2026-11-09T16:00:00+09:00")
+    rows = []
+    for week in range(1, 6):
+        observed = at - timedelta(days=7 * week, minutes=5)
+        rows.extend(
+            [
+                step_session(observed, 3000, identifier=f"history-{week}"),
+                record(
+                    "context_inference",
+                    f"context-{week}",
+                    observed,
+                    dict(place=dict(id="place_lab", name="研究拠点")),
+                ),
+            ]
+        )
+    rows.extend(
+        [
+            step_session(
+                at - timedelta(hours=1), 800, identifier="today-progress"
+            ),
+            step_session(at, 1000, identifier="today"),
+            record(
+                "context_inference",
+                "context-today",
+                at,
+                dict(place=dict(id="place_lab", name="研究拠点")),
+            ),
+        ]
+    )
+    result = step_shortage(rows, at)
+    assert result["status"] == "available" and result["low"]
+    assert result["context"]["basis"] == "weekday_place_time"
+    assert result["context"]["place_id"] == "place_lab"
+    assert result["context"]["place_name"] == "研究拠点"
 
 
 def test_fatigue_persistence_requires_coverage_and_separate_five_minute_bins():
@@ -664,6 +789,7 @@ def test_exercise_proposal_preference_pmtt_and_same_context_cooldown(tmp_path):
         status="available",
         low=True,
         provisional=False,
+        baseline_stage="formal",
         baseline_days=5,
         context=dict(
             basis="weekday_place_time",
@@ -673,12 +799,16 @@ def test_exercise_proposal_preference_pmtt_and_same_context_cooldown(tmp_path):
             time="09:00",
         ),
         usual_steps=4000,
+        lower_quartile_steps=3900,
         today_steps=1000,
         shortage_steps=3000,
+        minimum_shortage_steps=500,
+        minimum_shortage_fraction=0.25,
         cadence_steps_per_minute=100,
         walking_equivalent_minutes=30.0,
         candidates=exercise_candidates(3000),
         evidence_id="synthetic-today",
+        carry_evidence_id="synthetic-progress",
     )
 
     class Fixed:
@@ -700,12 +830,13 @@ def test_exercise_proposal_preference_pmtt_and_same_context_cooldown(tmp_path):
                 "preferences",
                 "exercise-on",
                 t - timedelta(days=1),
-                dict(exercise_proposals_enabled=True),
+                dict(exercise_proposals_enabled=True, daily_limit=6),
             )
         ],
     )
     question = queue.pending("p001", t)
     assert question["kind"] == "exerciseProposal"
+    assert "100歩/分" in question["prompt"]
     assert question["pmtt"]["condition"]["place_id"] == "place_lab"
     assert question["pmtt"]["cadence_steps_per_minute"] == 100
     assert len(question["pmtt"]["candidates"]) == 4

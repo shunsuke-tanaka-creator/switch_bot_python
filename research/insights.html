@@ -189,6 +189,11 @@
             <h3>入力修正の観測</h3>
             <p id="typing"></p>
           </div>
+          <!-- 追加: 運動提案を出さない段階も含め、歩数検出器の状態を表示する。 -->
+          <div>
+            <h3>文脈別の歩数</h3>
+            <p id="exercise"></p>
+          </div>
         </div>
       </section>
       <section>
@@ -330,6 +335,12 @@
             t.status === "available"
               ? `修正頻度 ${(100 * t.correction_rate).toFixed(1)}% / 基準上限 ${(100 * t.threshold).toFixed(1)}%。${t.unusual ? "修正が増えています。" : "継続した増加の条件は満たしていません。"}`
               : "同じ入力方式の比較用データが不足しています。";
+          // 追加: 文脈条件・基準日数・抑止理由を画面から確認できるようにする。
+          const exercise = d.exercise;
+          $("exercise").textContent =
+            exercise.status === "available"
+              ? `${exercise.context.weekday_name}・${exercise.context.place_name || exercise.context.place_id || "拠点不明（曜日×時刻）"}、通常${exercise.usual_steps}歩 / 今日${exercise.today_steps}歩。基準${exercise.baseline_days}日（${exercise.baseline_stage === "formal" ? "正式" : "暫定"}）。${exercise.low ? `不足${exercise.shortage_steps}歩。` : "提案閾値未満です。"}`
+              : `提案しません：${exercise.reason || "歩数データ不足"}。`;
           $("weatherHistory").textContent = d.weather
             .slice(-12)
             .map(
