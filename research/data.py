@@ -262,9 +262,14 @@ class LazySample(Mapping):
 
     def __init__(self, timeline, at, scope='current'):
         self.timeline, self.at, self.scope = timeline, at, scope
+        self._materialized = None
 
     def materialize(self):
-        return self.timeline.sample(self.at, self.scope)
+        # A sample never changes within one run (the Timeline is fixed), so
+        # build it once and reuse it across epochs, metrics and splits.
+        if self._materialized is None:
+            self._materialized = self.timeline.sample(self.at, self.scope)
+        return self._materialized
 
     def __getitem__(self, key):
         return self.materialize()[key]
