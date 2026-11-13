@@ -8,11 +8,13 @@ from lifelog_server import Store, create_app
 from research.data import Timeline, dt, F
 from research.events import ResearchEvent
 from research.baseline import conditional, weekday_trends
+from research.topology import VERSION as TOPOLOGY_VERSION
 from research.topology import GrowingMap, typing_windows, behavior_map
 from research.insights import (
     InsightEngine,
     exercise_candidates,
     fatigue_change,
+    persist_state_step_snapshots,
     recommend,
     step_shortage,
     typing_change,
@@ -127,6 +129,66 @@ def step_session(
     return result
 
 
+# 追加: 状態内歩数の合成履歴を、元の累積値と状態結合レコードの組で作る。
+def state_step_day(
+    at,
+    amount,
+    *,
+    state_id="pattern:state-a",
+    place_id="place_lab",
+    place_name="研究室",
+    action_id="task_analysis",
+    action_name="分析作業",
+    participant="p001",
+    device="synthetic-phone",
+    identifier=None,
+):
+    identifier = identifier or at.isoformat()
+    previous_id = identifier + "-previous"
+    current_id = identifier + "-current"
+
+    def raw(row_id, observed_at, steps):
+        item = record(
+            "step_snapshot",
+            row_id,
+            observed_at,
+            dict(
+                step_count=steps,
+                measurement_at=observed_at.isoformat(),
+                session_at=observed_at.isoformat(),
+                source_session_id=row_id,
+                device_id=device,
+            ),
+        )
+        item["participant"] = participant
+        return item
+
+    state = record(
+        "state_step_snapshot",
+        current_id,
+        at,
+        dict(
+            state_version=TOPOLOGY_VERSION,
+            state_id=state_id,
+            state_observed_at=at.isoformat(),
+            place=dict(id=place_id, name=place_name),
+            action=dict(id=action_id, name=action_name),
+            state_features=dict(input=0.5, corrections=0.1, pauses=0.2),
+            step_count=1000 + amount,
+            measurement_at=at.isoformat(),
+            session_at=at.isoformat(),
+            source_session_id=current_id,
+            device_id=device,
+        ),
+    )
+    state["participant"] = participant
+    return [
+        raw(previous_id, at - timedelta(minutes=5), 1000),
+        raw(current_id, at, 1000 + amount),
+        state,
+    ]
+
+
 def put(store, rows):
     for r in rows:
         store.save(r["kind"], r["id"], "p001", dt(r["at"]), r["payload"])
@@ -219,6 +281,19 @@ def test_growing_map_masking_capacity_restart_and_novelty():
     assert model.add("over", AT + timedelta(days=3), dict(a=3, b=3, c=3)) is None
     out = model.export(AT + timedelta(days=4))
     assert len(out["nodes"]) == 2 and out["at_capacity"]
+    # 追加: 同じ数値特徴でも場所・アクションが違えば別状態になる。
+    contextual = GrowingMap(radius=0.1)
+    labels_a = dict(
+        place=dict(id="place_a", name=None),
+        action=dict(id="task_a", name=None),
+    )
+    labels_b = dict(
+        place=dict(id="place_a", name=None),
+        action=dict(id="task_b", name=None),
+    )
+    state_a = contextual.add("state-a", AT, dict(a=0, b=0, c=0), labels_a)
+    state_b = contextual.add("state-b", AT, dict(a=0, b=0, c=0), labels_b)
+    assert state_a != state_b
     windows = typing_windows([session(AT - timedelta(minutes=10))], AT)
     assert behavior_map(windows, AT) == behavior_map(list(windows), AT)
 
@@ -376,194 +451,152 @@ def test_exercise_candidates_use_mets_and_five_minute_rounding():
     ]
 
 
-# 追加: 同曜日・同拠点・同時刻までの分布だけで歩数不足を判定する。
-def test_step_shortage_uses_weekday_place_time_context():
-    at = dt("2026-11-09T16:00:00+09:00")
-    rows = [
-        step_session(
-            at - timedelta(days=7 * week, minutes=5),
-            4000 + week * 20,
-            place_id="place_lab",
+# 追加: 新しい歩数を直近GrowingMap状態・場所・アクションと結合保存する。
+def test_persist_state_step_snapshot_binds_growing_map_assignment():
+    at = dt("2026-11-09T16:40:00+09:00")
+    store = Store(":memory:")
+    try:
+        typing = session(at - timedelta(minutes=10))
+        store.save(
+            typing["kind"],
+            typing["id"],
+            "p001",
+            dt(typing["at"]),
+            typing["payload"],
         )
-        for week in range(1, 6)
-    ]
-    rows += [
-        step_session(
-            at - timedelta(days=7 * week, minutes=4),
-            700,
-            place_id="place_home",
-            identifier=f"other-{week}",
-        )
-        for week in range(1, 6)
-    ]
-    # 追加: 当日の歩数増加で端末未携帯との区別に必要な観測を作る。
-    rows.append(
-        step_session(
-            at - timedelta(hours=1),
-            800,
-            place_id="place_lab",
-            identifier="today-progress",
-        )
-    )
-    rows.append(step_session(at, 1000, place_id="place_lab", identifier="today"))
-    result = step_shortage(rows, at)
-    assert result["status"] == "available" and result["low"]
-    assert result["context"]["basis"] == "weekday_place_time"
-    assert result["context"]["place_id"] == "place_lab"
-    assert result["baseline_days"] == 5
-    assert result["usual_steps"] == 4060
-    assert result["shortage_steps"] == 3060
-    assert "provisional" in result and result["provisional"] is False
-
-
-# 追加: 拠点不明時だけ曜日×時刻へフォールバックする。
-def test_step_shortage_falls_back_only_when_current_place_is_unknown():
-    at = dt("2026-11-09T16:00:00+09:00")
-    history = [
-        step_session(
-            at - timedelta(days=7 * week, minutes=5),
-            3000,
-            place_id="place_home" if week % 2 else "place_lab",
-        )
-        for week in range(1, 6)
-    ]
-    fallback = step_shortage(
-        history
-        + [
-            step_session(
-                at - timedelta(hours=1), 800, identifier="fallback-progress"
+        measured = at - timedelta(minutes=1)
+        store.save(
+            "step_snapshot",
+            "step-current",
+            "p001",
+            measured,
+            dict(
+                step_count=1500,
+                measurement_at=measured.isoformat(),
+                session_at=measured.isoformat(),
+                source_session_id="step-current",
+                device_id="synthetic-phone",
             ),
-            step_session(at, 1000, identifier="today-unknown"),
-        ],
-        at,
-    )
-    assert fallback["status"] == "available" and fallback["low"]
-    assert fallback["context"]["basis"] == "weekday_time_fallback"
-    known = step_shortage(
-        history
-        + [
-            step_session(
-                at - timedelta(hours=1),
-                800,
-                place_id="place_lab",
-                identifier="known-progress",
-            ),
-            step_session(
-                at, 1000, place_id="place_lab", identifier="today-known"
-            ),
-        ],
-        at,
-    )
-    assert known["status"] == "insufficient_data"
-    assert known["reason"] == "context_baseline_too_short"
-    assert known["baseline_days"] == 2
-
-
-# 追加: 古い歩数値は通常値にも当日判定にも使用しない。
-def test_step_shortage_rejects_stale_measurements():
-    at = dt("2026-11-09T16:00:00+09:00")
-    rows = [
-        step_session(
-            at - timedelta(days=7 * week),
-            3000,
-            measurement_at=at - timedelta(days=7 * week, hours=2),
         )
-        for week in range(1, 6)
-    ]
-    rows.append(
-        step_session(at, 1000, measurement_at=at - timedelta(hours=2))
-    )
-    result = step_shortage(rows, at)
-    assert result["status"] == "insufficient_data"
-    assert result["reason"] == "current_step_measurement_missing_or_stale"
-
-
-# 追加: 当日の歩数増加がなく端末未携帯と区別できない場合は提案判定しない。
-def test_step_shortage_requires_same_day_step_progress():
-    at = dt("2026-11-09T16:00:00+09:00")
-    history = [
-        step_session(
-            at - timedelta(days=7 * week, minutes=5),
-            3000,
-            place_id="place_lab",
-        )
-        for week in range(1, 6)
-    ]
-    result = step_shortage(
-        history
-        + [step_session(at, 1000, place_id="place_lab", identifier="today")],
-        at,
-    )
-    assert result["status"] == "insufficient_data"
-    assert result["reason"] == "device_carry_not_observed"
-
-
-# 追加: combined表示でも別参加者の歩数を本人の通常値へ混ぜない。
-def test_step_shortage_does_not_mix_participants():
-    at = dt("2026-11-09T16:00:00+09:00")
-    other_history = [
-        step_session(
-            at - timedelta(days=7 * week, minutes=5),
-            4000,
-            place_id="place_lab",
-            participant="p002",
-        )
-        for week in range(1, 6)
-    ]
-    result = step_shortage(
-        other_history
-        + [
-            step_session(
-                at - timedelta(hours=1),
-                800,
-                place_id="place_lab",
-                identifier="progress",
+        store.save(
+            "context_inference",
+            "context-current",
+            "p001",
+            at,
+            dict(
+                place=dict(id="place_lab", name="研究室"),
+                task=dict(id="task_analysis", name="分析作業"),
             ),
-            step_session(at, 1000, place_id="place_lab", identifier="today"),
-        ],
-        at,
-    )
-    assert result["status"] == "insufficient_data"
-    assert result["reason"] == "context_baseline_too_short"
-    assert result["baseline_days"] == 0
+        )
+        assert persist_state_step_snapshots(store, "p001", at) == 1
+        saved = next(
+            row
+            for row in store.rows("p001")
+            if row["kind"] == "state_step_snapshot"
+        )
+        assert saved["payload"]["state_version"] == TOPOLOGY_VERSION
+        assert saved["payload"]["place"]["id"] == "place_lab"
+        assert saved["payload"]["action"]["id"] == "task_analysis"
+    finally:
+        store.close()
 
 
-# 追加: セッションに拠点がなくても、同時刻のContextLSTM確定拠点を条件に使う。
-def test_step_shortage_uses_context_inference_place():
+# 追加: 曜日や時刻が異なっても、同じ状態の日別基準だけで不足を判定する。
+def test_step_shortage_uses_same_topological_state_baseline():
     at = dt("2026-11-09T16:00:00+09:00")
     rows = []
-    for week in range(1, 6):
-        observed = at - timedelta(days=7 * week, minutes=5)
-        rows.extend(
-            [
-                step_session(observed, 3000, identifier=f"history-{week}"),
-                record(
-                    "context_inference",
-                    f"context-{week}",
-                    observed,
-                    dict(place=dict(id="place_lab", name="研究拠点")),
-                ),
-            ]
-        )
-    rows.extend(
-        [
-            step_session(
-                at - timedelta(hours=1), 800, identifier="today-progress"
-            ),
-            step_session(at, 1000, identifier="today"),
-            record(
-                "context_inference",
-                "context-today",
-                at,
-                dict(place=dict(id="place_lab", name="研究拠点")),
-            ),
-        ]
-    )
-    result = step_shortage(rows, at)
+    for index, days in enumerate((1, 2, 4, 6, 9)):
+        observed = (at - timedelta(days=days)).replace(hour=8 + index)
+        rows.extend(state_step_day(observed, 3000, identifier=f"baseline-{index}"))
+    rows.extend(state_step_day(at, 1000, identifier="today"))
+    result = step_shortage(rows, at, participant="p001")
     assert result["status"] == "available" and result["low"]
-    assert result["context"]["basis"] == "weekday_place_time"
-    assert result["context"]["place_id"] == "place_lab"
-    assert result["context"]["place_name"] == "研究拠点"
+    assert result["context"]["basis"] == "topological_state"
+    assert result["context"]["state_id"] == "pattern:state-a"
+    assert result["usual_steps"] == 3000
+    assert result["today_steps"] == 1000
+    assert result["shortage_steps"] == 2000
+    assert result["baseline_days"] == 5
+    assert result["baseline_occurrences"] == 5
+    assert result["provisional"] is False
+
+
+# 追加: 場所・アクションが異なる別状態の歩数を基準へ混ぜない。
+def test_step_shortage_does_not_mix_other_state_baseline():
+    at = dt("2026-11-09T16:00:00+09:00")
+    rows = []
+    for index in range(2):
+        rows.extend(
+            state_step_day(
+                at - timedelta(days=index + 1),
+                3000,
+                identifier=f"target-{index}",
+            )
+        )
+    for index in range(5):
+        rows.extend(
+            state_step_day(
+                (at - timedelta(days=index + 1)).replace(hour=18),
+                8000,
+                state_id="pattern:state-b",
+                place_id="place_home",
+                action_id="task_rest",
+                identifier=f"other-{index}",
+            )
+        )
+    rows.extend(state_step_day(at, 1000, identifier="today"))
+    result = step_shortage(rows, at, participant="p001")
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "state_baseline_too_short"
+    assert result["baseline_days"] == 2
+
+
+# 追加: 状態結合履歴が3出現日に達するまでは提案判定をゲートする。
+def test_step_shortage_gates_short_state_history():
+    at = dt("2026-11-09T16:00:00+09:00")
+    rows = []
+    for index in range(2):
+        rows.extend(
+            state_step_day(
+                at - timedelta(days=index + 1),
+                3000,
+                identifier=f"baseline-{index}",
+            )
+        )
+    rows.extend(state_step_day(at, 1000, identifier="today"))
+    result = step_shortage(rows, at, participant="p001")
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "state_baseline_too_short"
+    assert result["required_days"] == 3
+
+
+# 追加: 状態割当て済みでも現在の歩数が古ければ提案判定しない。
+def test_step_shortage_rejects_stale_state_step_measurement():
+    observed = dt("2026-11-09T15:00:00+09:00")
+    rows = state_step_day(observed, 1000, identifier="stale")
+    result = step_shortage(
+        rows,
+        observed + timedelta(hours=1),
+        participant="p001",
+    )
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "current_state_step_measurement_missing_or_stale"
+
+
+# 追加: 状態割当てがない歩数履歴から基準を遡及生成しない。
+def test_step_shortage_requires_persisted_state_assignment():
+    at = dt("2026-11-09T16:00:00+09:00")
+    rows = [
+        step_session(
+            at - timedelta(days=index + 1),
+            3000,
+            identifier=f"legacy-{index}",
+        )
+        for index in range(5)
+    ]
+    result = step_shortage(rows, at, participant="p001")
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "current_state_step_measurement_missing_or_stale"
 
 
 def test_fatigue_persistence_requires_coverage_and_separate_five_minute_bins():
@@ -783,20 +816,23 @@ def test_typing_reason_precedes_typing_only_intervention(reason, expected):
     store.close()
 
 
-# 追加: 運動提案は既定無効で、有効時も同日同文脈では一度だけ発行する。
-def test_exercise_proposal_preference_pmtt_and_same_context_cooldown(tmp_path):
+# 追加: 運動提案は既定無効で、有効時も同日同状態では一度だけ発行する。
+def test_exercise_proposal_preference_pmtt_and_same_state_cooldown(tmp_path):
     exercise = dict(
         status="available",
         low=True,
         provisional=False,
         baseline_stage="formal",
         baseline_days=5,
+        baseline_occurrences=7,
         context=dict(
-            basis="weekday_place_time",
-            weekday=0,
+            basis="topological_state",
+            state_id="pattern:state-a",
+            state_version=TOPOLOGY_VERSION,
             place_id="place_lab",
             place_name="研究室",
-            time="09:00",
+            action_id="task_analysis",
+            action_name="分析作業",
         ),
         usual_steps=4000,
         lower_quartile_steps=3900,
@@ -837,9 +873,16 @@ def test_exercise_proposal_preference_pmtt_and_same_context_cooldown(tmp_path):
     question = queue.pending("p001", t)
     assert question["kind"] == "exerciseProposal"
     assert "100歩/分" in question["prompt"]
-    assert question["pmtt"]["condition"]["place_id"] == "place_lab"
+    assert question["pmtt"]["state"]["state_id"] == "pattern:state-a"
+    assert question["pmtt"]["state"]["place_id"] == "place_lab"
+    assert question["pmtt"]["state"]["action_id"] == "task_analysis"
     assert question["pmtt"]["cadence_steps_per_minute"] == 100
     assert len(question["pmtt"]["candidates"]) == 4
+    # 追加: 状態ベースの提案文へカレンダー条件を持ち込まない。
+    assert all(
+        text not in question["prompt"]
+        for text in ("同じ曜日", "同時刻", "曜日×時刻")
+    )
     put(
         store,
         [

@@ -5,6 +5,7 @@ import math
 import numpy as np
 from .data import dt
 from .baseline import conditional, weekday_trends
+from .topology import VERSION as TOPOLOGY_VERSION
 from .topology import available_rows, typing_windows, behavior_map
 
 
@@ -74,31 +75,77 @@ def persist_step_snapshot(store, participant, session_id, payload, fresh_seconds
     )
 
 
-# 追加: 既存sessionと新しいstep_snapshotを同じ観測形式にし、拠点推定を対応付ける。
-def step_observations(
-    rows, at, place_window_minutes=10, measurement_fresh_seconds=900
-):
-    visible = available_rows(rows, at)
-    context_rows = [r for r in visible if r["kind"] == "context_inference"]
-    from .context_data import catalog, resolve
-
-    classes, aliases = catalog(visible, at)
-
-    def inferred_place(measured_at, participant):
-        candidates = [
-            r
-            for r in context_rows
-            if r.get("participant") == participant
-            if abs((dt(r["at"]) - measured_at).total_seconds())
-            <= place_window_minutes * 60
-            and (r["payload"].get("place") or {}).get("id")
+# 追加: GrowingMapの状態割当てと鮮度付き歩数を、今後の状態別基準として結合保存する。
+def persist_state_step_snapshots(store, participant, at, fresh_seconds=900):
+    at = dt(at)
+    rows = available_rows(store.rows(participant), at)
+    saved = {
+        r["id"] for r in rows if r["kind"] == "state_step_snapshot"
+    }
+    snapshots = [
+        r
+        for r in rows
+        if r["kind"] == "step_snapshot"
+        and r["id"] not in saved
+        and timedelta(0) <= at - dt(r["payload"]["session_at"]) <= timedelta(
+            seconds=fresh_seconds
+        )
+    ]
+    if not snapshots:
+        return 0
+    patterns = behavior_map(typing_windows(rows, at), at, rows=rows)
+    nodes = {node["id"]: node for node in patterns["nodes"]}
+    assignments = [
+        assignment
+        for assignment in patterns["assignments"]
+        if (assignment.get("place") or {}).get("id")
+        and (assignment.get("action") or {}).get("id")
+    ]
+    inserted = 0
+    for row in snapshots:
+        payload = row["payload"]
+        session_at = dt(payload["session_at"])
+        nearby = [
+            assignment
+            for assignment in assignments
+            if abs((dt(assignment["end"]) - session_at).total_seconds())
+            <= fresh_seconds
         ]
-        if not candidates:
-            return None, None
-        row = min(candidates, key=lambda r: abs((dt(r["at"]) - measured_at).total_seconds()))
-        place = row["payload"]["place"]
-        return resolve(aliases["place"], place["id"]), place.get("name")
+        if not nearby:
+            continue
+        assignment = min(
+            nearby,
+            key=lambda value: abs(
+                (dt(value["end"]) - session_at).total_seconds()
+            ),
+        )
+        node = nodes[assignment["state_id"]]
+        inserted += store.save(
+            "state_step_snapshot",
+            row["id"],
+            participant,
+            dt(payload["measurement_at"]),
+            dict(
+                state_version=TOPOLOGY_VERSION,
+                state_id=assignment["state_id"],
+                state_observed_at=assignment["end"],
+                place=assignment["place"],
+                action=assignment["action"],
+                state_features=node["center"],
+                step_count=payload["step_count"],
+                measurement_at=payload["measurement_at"],
+                session_at=payload["session_at"],
+                source_session_id=payload["source_session_id"],
+                device_id=payload.get("device_id"),
+                received_at=at.isoformat(),
+            ),
+        )
+    return inserted
 
+
+# 追加: 既存sessionと新しいstep_snapshotを同じ鮮度付き歩数観測にする。
+def step_observations(rows, at, measurement_fresh_seconds=900):
+    visible = available_rows(rows, at)
     observations = {}
     for r in visible:
         payload = r["payload"]
@@ -113,8 +160,6 @@ def step_observations(
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
             source_id = payload["source_session_id"]
-            place_id = payload.get("place_id")
-            place_name = None
             device_id = payload.get("device_id")
             explicit = True
         elif r["kind"] == "session":
@@ -136,13 +181,6 @@ def step_observations(
                 continue
             source_id = payload.get("session_id", r["id"])
             device_id = payload.get("device_id")
-            place = context.get("place")
-            place_id = (
-                context.get("place_id")
-                or context.get("context_place_id")
-                or (place.get("id") if isinstance(place, dict) else None)
-            )
-            place_name = place.get("name") if isinstance(place, dict) else None
             explicit = False
         else:
             continue
@@ -152,14 +190,6 @@ def step_observations(
             seconds=measurement_fresh_seconds
         ):
             continue
-        if place_id:
-            place_id = resolve(aliases["place"], place_id)
-            # 追加: 保存時に名称がなくても、現在の拠点カタログから表示名を解決する。
-            place_name = place_name or classes["place"].get(place_id, {}).get("name")
-        else:
-            place_id, place_name = inferred_place(
-                measured_at, r.get("participant")
-            )
         observation = dict(
             at=measured_at,
             session_at=session_at,
@@ -167,8 +197,6 @@ def step_observations(
             source_id=source_id,
             participant=r.get("participant"),
             device_id=device_id,
-            place_id=place_id,
-            place_name=place_name,
         )
         observation_id = (r.get("participant"), source_id)
         if explicit or observation_id not in observations:
@@ -176,27 +204,55 @@ def step_observations(
     return sorted(observations.values(), key=lambda x: (x["at"], x["source_id"]))
 
 
-# 追加: 同曜日×同拠点×同時刻の中央値・25パーセンタイルで歩数不足を判定する。
+# 追加: 同じトポロジカル状態の日別歩数分布で運動不足を判定する。
 def step_shortage(
     rows,
     at,
     *,
+    participant=None,
+    state_aliases=None,
     provisional_days=3,
     formal_days=5,
     fresh_seconds=900,
-    time_tolerance_minutes=30,
     minimum_shortage_steps=500,
     minimum_shortage_fraction=0.25,
 ):
     at = dt(at)
+    visible = available_rows(rows, at)
     observations = step_observations(
-        rows, at, measurement_fresh_seconds=fresh_seconds
+        visible, at, measurement_fresh_seconds=fresh_seconds
     )
+    state_aliases = state_aliases or {}
+
+    def canonical_state(identity):
+        while identity in state_aliases:
+            identity = state_aliases[identity]
+        return identity
+
     today = at.date()
+    bindings = {}
+    for row in visible:
+        if row["kind"] != "state_step_snapshot":
+            continue
+        payload = row["payload"]
+        if (
+            payload.get("state_version") != TOPOLOGY_VERSION
+            or not payload.get("state_id")
+            or not (payload.get("place") or {}).get("id")
+            or not (payload.get("action") or {}).get("id")
+        ):
+            continue
+        bindings[(row.get("participant"), payload.get("source_session_id", row["id"]))] = dict(
+            id=row["id"],
+            participant=row.get("participant"),
+            **payload,
+        )
     current = next(
         (
             value
             for value in reversed(observations)
+            if (value["participant"], value["source_id"]) in bindings
+            and (participant is None or value["participant"] == participant)
             if value["at"].date() == today
             and timedelta(0) <= at - value["at"] <= timedelta(seconds=fresh_seconds)
             and timedelta(0)
@@ -209,76 +265,112 @@ def step_shortage(
         return dict(
             status="insufficient_data",
             low=False,
-            reason="current_step_measurement_missing_or_stale",
+            reason="current_state_step_measurement_missing_or_stale",
         )
-    place_id = current["place_id"]
-    basis = "weekday_place_time" if place_id else "weekday_time_fallback"
+    current_binding = bindings[(current["participant"], current["source_id"])]
+    state_id = canonical_state(current_binding["state_id"])
     context = dict(
-        basis=basis,
-        weekday=at.weekday(),
-        weekday_name=("月", "火", "水", "木", "金", "土", "日")[
-            at.weekday()
-        ]
-        + "曜日",
-        place_id=place_id,
-        place_name=current["place_name"],
-        time=at.strftime("%H:%M"),
+        basis="topological_state",
+        state_id=state_id,
+        state_version=current_binding["state_version"],
+        place_id=current_binding["place"]["id"],
+        place_name=current_binding["place"].get("name"),
+        action_id=current_binding["action"]["id"],
+        action_name=current_binding["action"].get("name"),
     )
-    # 追加: 当日の別スナップショットから歩数増加を確認し、未携帯と区別できない日は抑止する。
-    progress = next(
-        (
-            value
-            for value in reversed(observations)
-            if value["participant"] == current["participant"]
+    # 追加: 日累積値の差分を、その観測時に永続化された状態へ帰属させる。
+    previous = {}
+    daily = {}
+    progress = None
+    for value in observations:
+        key = (
+            value["participant"],
+            value.get("device_id"),
+            value["at"].date(),
+        )
+        prior = previous.get(key)
+        previous[key] = value
+        # 追加: 長い観測欠落中の歩数を、直近状態へまとめて誤帰属させない。
+        if (
+            prior is None
+            or value["steps"] < prior["steps"]
+            or value["at"] - prior["at"] > timedelta(seconds=fresh_seconds)
+        ):
+            continue
+        delta = value["steps"] - prior["steps"]
+        if (
+            value["participant"] == current["participant"]
+            and value.get("device_id") == current.get("device_id")
             and value["at"].date() == today
-            and value["at"] < current["at"]
-            and value["steps"] < current["steps"]
-        ),
-        None,
-    )
+            and delta > 0
+        ):
+            progress = value
+        binding = bindings.get((value["participant"], value["source_id"]))
+        if binding is None:
+            continue
+        binding_state = canonical_state(binding["state_id"])
+        cell = daily.setdefault(
+            (
+                value["participant"],
+                value.get("device_id"),
+                value["at"].date(),
+                binding["state_version"],
+                binding_state,
+            ),
+            dict(steps=0.0, occurrences=0),
+        )
+        cell["steps"] += delta
+        cell["occurrences"] += 1
     if progress is None:
         return dict(
             status="insufficient_data",
             low=False,
             reason="device_carry_not_observed",
-            today_steps=int(round(current["steps"])),
             context=context,
         )
-    target_seconds = at.hour * 3600 + at.minute * 60 + at.second
-    days = {}
-    for value in observations:
-        date = value["at"].date()
-        if (
-            value["participant"] != current["participant"]
-            or date >= today
-            or value["at"].weekday() != at.weekday()
-        ):
-            continue
-        if place_id and value["place_id"] != place_id:
-            continue
-        seconds = value["at"].hour * 3600 + value["at"].minute * 60 + value["at"].second
-        lag = target_seconds - seconds
-        if not 0 <= lag <= time_tolerance_minutes * 60:
-            continue
-        previous = days.get(date)
-        if previous is None or value["at"] > previous["at"]:
-            days[date] = value
-    baseline = [value["steps"] for _, value in sorted(days.items())]
+    current_key = (
+        current["participant"],
+        current.get("device_id"),
+        today,
+        current_binding["state_version"],
+        state_id,
+    )
+    current_day = daily.get(current_key)
+    if current_day is None:
+        return dict(
+            status="insufficient_data",
+            low=False,
+            reason="current_state_steps_unavailable",
+            context=context,
+        )
+    past = [
+        (date, value)
+        for (owner, device, date, version, state), value in daily.items()
+        if owner == current["participant"]
+        and device == current.get("device_id")
+        and date < today
+        and version == current_binding["state_version"]
+        and state == state_id
+    ]
+    baseline = [value["steps"] for _, value in sorted(past)]
     baseline_days = len(baseline)
+    baseline_occurrences = sum(value["occurrences"] for _, value in past)
     if baseline_days < provisional_days:
         return dict(
             status="insufficient_data",
             low=False,
-            reason="context_baseline_too_short",
+            reason="state_baseline_too_short",
             baseline_days=baseline_days,
+            baseline_occurrences=baseline_occurrences,
             required_days=provisional_days,
             context=context,
         )
     usual = float(np.median(baseline))
     lower_quartile = float(np.quantile(baseline, 0.25))
-    shortage = max(0, int(round(usual - current["steps"])))
+    today_steps = current_day["steps"]
+    shortage = max(0, int(round(usual - today_steps)))
     low = bool(
-        current["steps"] < lower_quartile
+        today_steps < lower_quartile
         and shortage >= minimum_shortage_steps
         and shortage >= usual * minimum_shortage_fraction
     )
@@ -288,10 +380,11 @@ def step_shortage(
         provisional=baseline_days < formal_days,
         baseline_stage="provisional" if baseline_days < formal_days else "formal",
         baseline_days=baseline_days,
+        baseline_occurrences=baseline_occurrences,
         context=context,
         usual_steps=int(round(usual)),
         lower_quartile_steps=int(round(lower_quartile)),
-        today_steps=int(round(current["steps"])),
+        today_steps=int(round(today_steps)),
         shortage_steps=shortage,
         minimum_shortage_steps=minimum_shortage_steps,
         minimum_shortage_fraction=minimum_shortage_fraction,
@@ -300,7 +393,7 @@ def step_shortage(
         candidates=exercise_candidates(shortage) if low else [],
         evidence_id=current["source_id"],
         carry_evidence_id=progress["source_id"],
-        note="research threshold; fresh session-backed cumulative steps with same-day progress",
+        note="research threshold; daily step deltas within one persisted topological state",
     )
     return result
 
@@ -459,7 +552,16 @@ class InsightEngine:
         source = [
             r
             for r in rows
-            if r["kind"] in ("session", "narrative", "correction", "research_event")
+            if r["kind"]
+            in (
+                "session",
+                "narrative",
+                "correction",
+                "research_event",
+                "context_inference",
+                "step_snapshot",
+                "state_step_snapshot",
+            )
         ]
         signature = tuple((r.get("seq"), r["kind"], r["id"]) for r in source)
         bucket = at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0)
@@ -504,7 +606,7 @@ class InsightEngine:
                     windows,
                     at,
                     radius=self.config.get("pattern_radius", 0.35),
-                    rows=source,
+                    rows=rows,
                 ),
                 places=dict(nodes=[],edges=[],current=None,latest=None,destination=dict(status='gps_disabled',places=[]),anomaly=None,time_anomaly=None),
                 weather=[
@@ -542,12 +644,11 @@ class InsightEngine:
         exercise = step_shortage(
             rows,
             at,
+            participant=p,
+            state_aliases=fixed["patterns"].get("aliases"),
             provisional_days=self.config.get("exercise_baseline_provisional_days", 3),
             formal_days=self.config.get("exercise_baseline_days", 5),
             fresh_seconds=self.config.get("exercise_step_fresh_seconds", 900),
-            time_tolerance_minutes=self.config.get(
-                "exercise_baseline_time_tolerance_minutes", 30
-            ),
             minimum_shortage_steps=self.config.get(
                 "exercise_minimum_shortage_steps", 500
             ),

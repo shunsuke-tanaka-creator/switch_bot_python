@@ -346,7 +346,7 @@ class QuestionQueue:
                     [(a["label"], "accept:" + a["action"]) for a in ranked]
                     + [("今はしない", "declined"), ("提案を停止", "stop")]
                 )
-            # 追加: 文脈条件付き歩数不足を同じ提案上限・停止・延期基盤へ統合する。
+            # 追加: 状態条件付き歩数不足を同じ提案上限・停止・延期基盤へ統合する。
             exercise = insight.get("exercise") or {}
             exercise_ready = exercise.get("status") == "available" and exercise.get(
                 "low"
@@ -356,9 +356,7 @@ class QuestionQueue:
                 "exercise:"
                 + at.date().isoformat()
                 + ":"
-                + str(exercise_context.get("weekday"))
-                + ":"
-                + (exercise_context.get("place_id") or "unknown")
+                + (exercise_context.get("state_id") or "unknown")
             )
             exercise_duplicate = any(
                 r["payload"]["kind"] == "exerciseProposal"
@@ -383,7 +381,7 @@ class QuestionQueue:
             gate(
                 "exercise_cooldown",
                 not exercise_duplicate,
-                "same-day context already offered" if exercise_duplicate else "clear",
+                "same-day state already offered" if exercise_duplicate else "clear",
             )
             if (
                 kind is None
@@ -398,16 +396,12 @@ class QuestionQueue:
                 place = exercise_context.get("place_name") or exercise_context.get(
                     "place_id"
                 )
-                condition = (
-                    f"{place}・{exercise_context.get('weekday_name', '同じ曜日')}"
-                    if place
-                    else (
-                        f"{exercise_context.get('weekday_name', '同じ曜日')}"
-                        "（拠点不明のため曜日×時刻へフォールバック）"
-                    )
+                action = exercise_context.get("action_name") or exercise_context.get(
+                    "action_id"
                 )
+                condition = f"「{place or 'この場所'}・{action or 'この行動'}」"
                 prompt = (
-                    f"{condition}の普段より、同時刻までの歩数が"
+                    f"{condition}では普段より歩数が"
                     f"{exercise['shortage_steps']}歩少なめです。"
                     f"100歩/分の歩行相当で約{exercise['walking_equivalent_minutes']:g}分です。"
                     "運動候補を選びますか？"
@@ -424,7 +418,7 @@ class QuestionQueue:
                     + [("今はしない", "declined"), ("提案を停止", "stop")]
                 )
                 pmtt = dict(
-                    condition=exercise_context,
+                    state=exercise_context,
                     usual_steps=exercise["usual_steps"],
                     lower_quartile_steps=exercise["lower_quartile_steps"],
                     today_steps=exercise["today_steps"],
@@ -438,6 +432,7 @@ class QuestionQueue:
                         "walking_equivalent_minutes"
                     ],
                     baseline_days=exercise["baseline_days"],
+                    baseline_occurrences=exercise["baseline_occurrences"],
                     baseline_stage=exercise["baseline_stage"],
                     provisional=exercise["provisional"],
                     candidates=exercise["candidates"],
