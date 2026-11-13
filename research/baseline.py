@@ -12,9 +12,9 @@ def period(t):
         "morning"
         if 5 <= t.hour < 12
         else "afternoon"
-        if t.hour < 17
+        if 12 <= t.hour < 17
         else "evening"
-        if t.hour < 22
+        if 17 <= t.hour < 22
         else "night"
     )
 

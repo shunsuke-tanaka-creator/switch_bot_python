@@ -6,9 +6,31 @@ import numpy as np
 from .data import TEXT_DIM
 
 
-@lru_cache(maxsize=2)
+def encoder_identity(directory):
+    root = Path(directory).resolve()
+    if not root.is_dir():
+        raise ValueError('text_model must be an existing local model directory')
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob('*')):
+        if path.is_file() and not any(part.startswith('.') for part in path.relative_to(root).parts):
+            digest.update(str(path.relative_to(root)).encode())
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024*1024), b''):
+                    digest.update(chunk)
+    return digest.hexdigest()
+
+
 def local_encoder(directory):
-    return LocalEncoder(directory)
+    path = str(Path(directory).resolve())
+    return _encoder(path, encoder_identity(path))
+
+
+@lru_cache(maxsize=2)
+def _encoder(directory, identity):
+    encoder = LocalEncoder(directory)
+    if encoder.identity != identity:
+        raise ValueError('text encoder changed while loading')
+    return encoder
 
 
 class LocalEncoder:
@@ -17,14 +39,9 @@ class LocalEncoder:
         if not root.is_dir():raise ValueError('text_model must be an existing local model directory')
         from sentence_transformers import SentenceTransformer
         self.model=SentenceTransformer(str(root),device='cpu',local_files_only=True,trust_remote_code=False)
-        digest=hashlib.sha256()
-        for path in sorted(root.rglob('*')):
-            if path.is_file() and path.suffix in ('.json','.safetensors','.model','.txt'):
-                digest.update(str(path.relative_to(root)).encode())
-                with path.open('rb') as f:
-                    for chunk in iter(lambda:f.read(1024*1024),b''):digest.update(chunk)
-        self.identity=digest.hexdigest()
-        dims=self.model.get_sentence_embedding_dimension()
+        self.identity=encoder_identity(root)
+        dimension = getattr(self.model, 'get_embedding_dimension', None)
+        dims = dimension() if dimension is not None else self.model.get_sentence_embedding_dimension()
         self.projection=np.random.default_rng(17).normal(size=(dims,TEXT_DIM)).astype(np.float32)/np.sqrt(TEXT_DIM)
 
     @lru_cache(maxsize=10000)

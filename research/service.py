@@ -2,16 +2,14 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 import logging
 from pathlib import Path
 import re
-import time
 from uuid import uuid4
 import httpx
-from fastapi import HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import HTTPException, Query, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 from .data import SCALES, ACTIVITIES, Timeline, dt, monday
 from .data_modes import (
@@ -80,6 +78,7 @@ class Feedback(BaseModel):
 
 class TrainRequest(BaseModel):
     data_mode: str = "real"
+    force: bool = False
     @model_validator(mode='after')
     def valid(self):
         data_mode(self.data_mode)
@@ -147,65 +146,10 @@ class Engine:
         return result
 
     def infer(self,p,at=None,data_mode_='real'):
-        data_mode_=data_mode(data_mode_)
-        at=dt(at or utc());rows=self.rows(p,data_mode_);timeline=None
-        status=self.status(p,data_mode_)
-        response=dict(at=iso(at),source='model',status='untrained',current=None,daily=None,comparisons={},activity=None,
-                      data_mode=data_mode_,contains_sample=data_mode_!='real' or p==self.sample_participant,model=status)
-        checkpoint=self.read_path(p,data_mode_,'active.pt')
-        if not checkpoint.exists():return response
-        import numpy as np
-        import torch
-        from .model import HierarchicalLSTM
-        from .train import batch
-        from .data import VERSION, FEATURES
-        state=torch.load(checkpoint,map_location='cpu',weights_only=True)
-        if state.get('version')!=VERSION or state.get('features')!=FEATURES:
-            response['status']='incompatible_checkpoint';return response
-        timeline=Timeline(rows,text_model=state['report'].get('text_model'))
-        identity=timeline.encoder.identity if timeline.encoder else 'character-ngram-v1'
-        if identity!=state['report'].get('text_identity',identity):
-            response['status']='text_encoder_changed';return response
-        model=HierarchicalLSTM(**state['settings']);model.load_state_dict(state['weights']);model.eval()
-        # Do not display unvalidated heads, stale data, or synthetic/random outputs as measured states.
-        events=[e for e in timeline.events if e[0]<=at and e[1] in ('key','session','switchbot','switchbot_observation','heartbeat')]
-        if not events or (at-events[-1][0]).total_seconds()>3600:
-            response['status']='observation_unknown';return response
-        with torch.no_grad():
-            outputs={}
-            for scope in ('current','daily'):
-                result=model(batch([timeline.sample(at,scope)],'cpu',torch.tensor(state['mean']),torch.tensor(state['std'])))
-                outputs[scope]=result[scope][0].numpy()
-                if scope=='current':activity_prob=torch.softmax(result['activity'][0],dim=-1)
-            if state['report'].get('activity_train_n',0)>=10 and state['report']['validation']['activity_n']>=3 and activity_prob.max().item()>=.6:
-                response['activity']=dict(label=ACTIVITIES[activity_prob.argmax().item()],source='model',score=float(activity_prob.max()),note='uncalibrated class score')
-        response['status']='ready';response['model']=state['report']
-        for scope,pred in outputs.items():
-            response[scope]={}
-            for i,k in enumerate(SCALES):
-                valid=state['report']['validation'][scope][k]
-                supported=state['report']['support'][scope][i]>=10 and valid['n']>=3
-                response[scope][k]=dict(value=float(pred[i]) if supported else None,status='estimated' if supported else 'insufficient_labels',validation=valid)
-        if all(v['value'] is None for scope in ('current','daily') for v in response[scope].values()):response['status']='insufficient_labels'
-        past=[l for l in timeline.labels if l.scope=='current' and l.available<at]
-        activity=timeline.activity_at(at)
-        groups={'all':past,'time':[l for l in past if l.at.hour==at.hour],
-                'weekday':[l for l in past if l.at.weekday()==at.weekday()],
-                'activity':[l for l in past if activity>=0 and l.activity==activity]}
-        for name,group in groups.items():
-            result={}
-            for i,k in enumerate(SCALES):
-                values=[float(l.values[i]) for l in group if np.isfinite(l.values[i])]
-                value=response['current'][k]['value']
-                enough=len(values)>=5 and value is not None
-                result[k]=dict(n=len(values),mean=float(np.mean(values)) if values else None,
-                               difference=value-float(np.mean(values)) if enough else None,
-                               z=(value-float(np.mean(values)))/max(float(np.std(values)),.5) if enough else None,
-                               status='available' if enough else 'insufficient_data')
-            response['comparisons'][name]=result
-        return response
+        from .inference import infer_state
+        return infer_state(self,p,at,data_mode_)
 
-    def train(self,p,data_mode_='real'):
+    def train(self,p,data_mode_='real',force=False):
         data_mode_=data_mode(data_mode_)
         from .train import train
         if self.config.get('research_require_cuda'):
@@ -215,7 +159,12 @@ class Engine:
         count=len(Timeline(rows).labels)
         identity=source_identity(self.store,p,data_mode_,self.sample_participant,self.sample_manifest)
         status=self.status(p,data_mode_)
-        if status.get('fingerprint')==identity['fingerprint']:
+        from .provenance import experiment_id
+        from .text import encoder_identity
+        from .data import VERSION
+        text_path = self.config.get('text_model')
+        run_id = experiment_id(identity['fingerprint'], dict(version=VERSION,epochs=self.config.get('research_epochs',20),text_identity=encoder_identity(text_path) if text_path else 'character-ngram-v1'))
+        if not force and status.get('experiment_id')==run_id and (self.directory(p,data_mode_)/'active.pt').exists():
             return dict(status='no_new_labels',data_mode=data_mode_,contains_sample=data_mode_!='real' or p==self.sample_participant,
                         fingerprint=identity['fingerprint'],source_max_seq=identity['source_max_seq'],
                         sample_manifest_hash=identity['sample_manifest_hash'])
@@ -223,10 +172,11 @@ class Engine:
                      data_mode=data_mode_,contains_sample=data_mode_!='real' or p==self.sample_participant,
                      source_fingerprint=identity['fingerprint'],source_max_seq=identity['source_max_seq'],
                      sample_manifest_hash=identity['sample_manifest_hash'])
+        result['experiment_id']=run_id
         result['training_record_count']=count
         error=self.directory(p,data_mode_)/'error.json'
         if error.exists():error.unlink()
-        from .train import atomic_json
+        from .io import atomic_json
         atomic_json(self.directory(p,data_mode_)/'status.json',result)
         return result
 
@@ -303,7 +253,7 @@ def install(app,store,config):
 
     @app.post('/api/heartbeats')
     def heartbeat(payload:Heartbeat):
-        return dict(inserted=store.save('heartbeat',payload.event_id,payload.participant_id,payload.occurred_at,payload.model_dump(mode='json')))
+        return dict(inserted=store.save('heartbeat',payload.event_id,payload.participant_id,payload.occurred_at,dict(payload.model_dump(mode='json'),received_at=iso(utc()))))
 
     @app.post('/api/research/{participant}/events')
     async def research_event(participant:str,payload:ResearchEvent):
@@ -407,7 +357,7 @@ def install(app,store,config):
         p=identifier(participant)
         body=payload.model_dump()
         forwarded=await proxy(f'/api/research/{p}/train','POST',body)
-        return forwarded or await asyncio.to_thread(engine.train,p,payload.data_mode)
+        return forwarded or await asyncio.to_thread(engine.train,p,payload.data_mode,payload.force)
 
     @app.post('/api/research/{participant}/corrections')
     async def correct(participant:str,payload:Correction):
@@ -455,7 +405,7 @@ def install(app,store,config):
                             for p in participants(store,engine.sample_participant):
                                 for data_mode_ in modes:await asyncio.to_thread(engine.train,p,data_mode_)
                         except Exception as exc:
-                            from .train import atomic_json
+                            from .io import atomic_json
                             for p in participants(store,engine.sample_participant):
                                 for data_mode_ in config.get('research_training_modes',['real']):
                                     atomic_json(engine.directory(p,data_mode_)/'error.json',dict(at=iso(utc()),error=str(exc)))

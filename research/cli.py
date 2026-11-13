@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import sqlite3
 import time
 from urllib.parse import urlparse
 import httpx
@@ -47,7 +46,7 @@ def import_file(store,path,participant):
 
 def sync(store,source,participant,state_path,client=None):
     # Persist cursor only after inserts commit. Retry is idempotent using original record IDs.
-    from .train import atomic_json
+    from .io import atomic_json
     if urlparse(source).scheme not in ('http','https'):raise ValueError('HTTP(S) source required')
     state_path=Path(state_path)
     state=json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -83,7 +82,7 @@ def main():
     for name in ('export-bundle','import-bundle'):
         command=sub.add_parser(name);command.add_argument('path');command.add_argument('--models',default='data/models')
     context=sub.add_parser('context-train');context.add_argument('--models',default='data/models');context.add_argument('--epochs',type=int,default=12)
-    context.add_argument('--text-model');context.add_argument('--device',choices=['auto','cpu','cuda','mps'],default='auto');context.add_argument('--evaluate-test',action='store_true')
+    context.add_argument('--text-model');context.add_argument('--device',choices=['auto','cpu','cuda','mps'],default='auto');context.add_argument('--evaluate-test',action='store_true');context.add_argument('--force',action='store_true')
     sample=sub.add_parser('generate-sample');sample.add_argument('--calendar',required=True);sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
     sample.add_argument('--manifest',default=None);sample.add_argument('--dry-run',action='store_true');sample.add_argument('--include-today',action='store_true')
     args=p.parse_args();identifier(args.participant)
@@ -101,7 +100,7 @@ def main():
         elif args.command=='context-train':
             from .context_learning import train_context
             result=train_context(store.rows(args.participant),Path(args.models)/args.participant/'real'/'context',datetime.now(timezone.utc),
-                                 epochs=args.epochs,text_model=args.text_model,device=args.device,evaluate_test=args.evaluate_test)
+                                 epochs=args.epochs,text_model=args.text_model,device=args.device,evaluate_test=args.evaluate_test,force=args.force)
         elif args.command=='export':result=export_all(store,args.participant,args.path)
         elif args.command=='import':result=dict(inserted=import_file(store,args.path,args.participant))
         elif args.command=='sync':

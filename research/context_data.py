@@ -7,7 +7,7 @@ from .data import dt
 from .topology import available_rows
 
 AXES = ("place", "task")
-VERSION = "behavior-context-v1"
+VERSION = "behavior-context-v2-received-cutoff"
 
 
 def ident(axis, anchor):

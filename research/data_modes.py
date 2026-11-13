@@ -68,13 +68,16 @@ def source_identity(
     mode = data_mode(mode)
     sources = participants_for_mode(participant, mode, sample_participant)
     maximum = {}
+    content = {}
     for source in sources:
         rows = [r for r in store.rows(source) if is_training_row(r)]
+        content[source] = hashlib.sha256(json.dumps([(r['id'],r['kind'],r['at'],r['payload']) for r in rows],sort_keys=True).encode()).hexdigest()
         maximum[source] = max((int(r.get("seq", 0)) for r in rows), default=0)
     manifest_hash = file_hash(sample_manifest) if sample_participant in sources and sample_manifest else None
     value = {
         "data_mode": mode,
         "source_max_seq": maximum,
+        "source_content_hash": content,
         "sample_manifest_hash": manifest_hash,
     }
     value["fingerprint"] = hashlib.sha256(

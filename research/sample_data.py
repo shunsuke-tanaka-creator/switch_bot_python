@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import hashlib
 import json
+import re
 import math
 import os
 
@@ -264,6 +265,14 @@ def generate_sample(
     include_today=False,
     now=None,
 ):
+    if sample_participant == source_participant:
+        raise ValueError("sample participant must differ from source participant")
+    if not sample_participant.endswith('-sample') or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', sample_participant):
+        raise ValueError("sample participant must use a reserved *-sample ID")
+    if store is not None:
+        existing_rows = store.rows(sample_participant)
+        if existing_rows and not Path(manifest_path or f"data/sample/{sample_participant}/manifest.json").exists():
+            raise ValueError("sample destination already has records without a manifest")
     calendar, input_hash = load_calendar(calendar_path)
     if calendar.get("participant_id") != source_participant:
         raise ValueError("calendar participant_id does not match --participant")

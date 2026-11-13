@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from functools import lru_cache
+from collections.abc import Mapping
 from bisect import bisect_right
 import hashlib
 import json
@@ -24,7 +25,7 @@ BASE = ['key_count','delete_count','commit_chars','pause_count','mean_interval',
 # Every measurement has a presence channel. Missing is never interpreted as a measured zero.
 FEATURES = BASE + [f'{x}_known' for x in BASE] + [f'text_{i}' for i in range(TEXT_DIM)]
 F = len(FEATURES)
-VERSION = 'hierarchical-v1-5min-1h-jst-week'
+VERSION = 'hierarchical-v2-received-cutoff'
 
 
 def dt(s):
@@ -45,6 +46,23 @@ def text_vector(text):
             out[h % TEXT_DIM] += 1 if h & 256 else -1
     norm = np.linalg.norm(out)
     return out / norm if norm else out
+
+
+def committed_text(events):
+    """Reconstruct commits inside one window; replacements remove an observed suffix.
+
+    A prefix from an earlier bin is not in this window, so only the final candidate
+    is represented here. This is an event feature, not a full document snapshot.
+    """
+    text = ''
+    for _, kind, payload in events:
+        if kind != 'commit':
+            continue
+        prefix = payload.get('replaces', '')
+        if prefix and text.endswith(prefix):
+            text = text[:-len(prefix)]
+        text += payload.get('text', '')
+    return text
 
 
 @dataclass
@@ -77,12 +95,14 @@ class Timeline:
             elif kind in {'switchbot','switchbot_observation','heartbeat','sensor'}:
                 self.events.append((at, kind, p))
             elif kind == 'correction':
+                at = max(at, dt(p.get('received_at', at)))
                 self.corrections.append((at, p))
                 if p.get('activity') in ACTIVITIES:
                     self.labels.append(Label(dt(p['end']),at,'activity',np.full(5,np.nan,np.float32),ACTIVITIES.index(p['activity']),r['id']+':activity'))
                 if p.get('scores'):
                     self.labels.append(Label(dt(p['end']), at, p.get('scope','current'), self.scores(p['scores']), id=r['id']))
             elif kind == 'narrative':
+                at = max(at, dt(p.get('received_at', at)))
                 answer = p.get('answer', {})
                 question = p.get('question', {}).get('kind')
                 cutoff = dt(p.get('question_shown_at') or p.get('detected_at') or r['at'])
@@ -132,9 +152,11 @@ class Timeline:
         prior = [l for l in self.labels if l.scope == 'activity' and l.available <= at and 0 <= (at-l.at).total_seconds() <= 1800]
         return prior[-1].activity if prior else -1
 
-    def features(self, start, end):
-        vals = {}; stop=bisect_right(self.event_times,end); begin=bisect_right(self.event_times,start)
-        recent=[e for e in self.events[:stop] if dt(e[2].get('_available_at',e[2].get('received_at',e[0])))<=end]
+    def features(self, start, end, available_at=None):
+        # Event time selects the bin; arrival time is compared with the prediction cutoff.
+        available_at = end if available_at is None else dt(available_at)
+        vals = {}; stop=bisect_right(self.event_times,end)
+        recent=[e for e in self.events[:stop] if dt(e[2].get('_available_at',e[2].get('received_at',e[0])))<=available_at]
         window=[e for e in recent if start<e[0]<=end]
         # Without coverage, no key events is unknown; observed non-use is represented by presence mask.
         heart = next((e for e in reversed(recent) if e[1] == 'heartbeat'), None)
@@ -149,14 +171,14 @@ class Timeline:
         if latest_session: vals['observation_age'] = min((end-latest_session[0]).total_seconds()/3600, 24)
         keys = [e[0] for e in window if e[1] == 'key']
         coverage = bool(sessions or keys or (heart and (end-heart[0]).total_seconds() <= 300 and heart[2].get('logging_enabled')))
+        text = committed_text(window)
         if coverage:
             vals.update(key_count=math.log1p(len(keys)), delete_count=math.log1p(sum(e[1]=='delete' for e in window)),
-                        commit_chars=math.log1p(sum(len(e[2].get('text','')) for e in window if e[1]=='commit')),
+                        commit_chars=math.log1p(len(text)),
                         observed_session=float(bool(sessions)))
         gaps = np.diff([k.timestamp() for k in keys])
         if len(gaps): vals.update(pause_count=math.log1p(sum(gaps>2)), mean_interval=float(np.mean(gaps))/60, max_interval=float(max(gaps))/60)
         # Exclude context.before/after from text features: overlapping text would duplicate history.
-        text = ''.join(e[2].get('text','') for e in window if e[1]=='commit')
         if text: vals['text_chars'] = math.log1p(len(text))
         if latest_session:
             c = latest_session[2].get('context') or {}
@@ -172,8 +194,8 @@ class Timeline:
                         fresh=field_time and 0<=(end-dt(field_time)).total_seconds()<=7200
                         if fresh and isinstance(c.get(src),(int,float)) and math.isfinite(c[src]): vals[dest] = math.log1p(max(0,c[src]))
                     vals['health_age'] = age/3600
-                    if (c.get('measurement_updated_at') or {}).get('battery_level') and c.get('battery_state') not in (None,'unknown'): vals['charging'] = float(c['battery_state'] in ('charging','full'))
-                    if (c.get('measurement_updated_at') or {}).get('calendar_events') and c.get('calendar_events') is not None:
+                    if (c.get('measurement_updated_at') or {}).get('battery_level') and 0 <= (end-dt(c['measurement_updated_at']['battery_level'])).total_seconds() <= 7200 and c.get('battery_state') not in (None,'unknown'): vals['charging'] = float(c['battery_state'] in ('charging','full'))
+                    if (c.get('measurement_updated_at') or {}).get('calendar_events') and 0 <= (end-dt(c['measurement_updated_at']['calendar_events'])).total_seconds() <= 7200 and c.get('calendar_events') is not None:
                         ev = c['calendar_events']; vals['calendar_count'] = math.log1p(len(ev))
                         vals['calendar_busy'] = float(any(dt(x['start']) <= end < dt(x['end']) for x in ev))
         for prefix, word in [('door','玄関'),('room','寝室')]:
@@ -217,18 +239,42 @@ class Timeline:
                 t=a; k=0
                 while t < b and k < 12:
                     e=min(t+timedelta(minutes=5),b)
-                    x[day,j,k]=self.features(t,e); t=e; k+=1
+                    x[day,j,k]=self.features(t,e,at); t=e; k+=1
                 lengths[day,j]=k
             units[day]=len(cuts)-1
         # At exactly midnight create one partial, empty bin so packing remains well defined.
         if units[at.weekday()] == 0:
             units[at.weekday()]=1; lengths[at.weekday(),0]=1
-            x[at.weekday(),0,0]=self.features(at,at)
+            x[at.weekday(),0,0]=self.features(at,at,at)
         # Previous four weeks of sensor-only daily features, all strictly before current week.
-        history=np.stack([self.features(week-timedelta(days=i+1),week-timedelta(days=i)) for i in reversed(range(28))])
+        history=np.stack([self.features(week-timedelta(days=i+1),week-timedelta(days=i),at) for i in reversed(range(28))])
         activity=self.activity_at(at)
         return dict(x=x,lengths=lengths,units=units,days=np.int64(at.weekday()+1),history=history,
                     personal=self.baseline(at,scope,activity),activity=np.int64(activity))
 
     def examples(self):
-        return [(l,self.sample(l.at,l.scope)) for l in self.labels if l.scope in ('current','daily','activity')]
+        return [(l,LazySample(self,l.at,l.scope)) for l in self.labels if l.scope in ('current','daily','activity')]
+
+
+class LazySample(Mapping):
+    """Store a cutoff, not a 1.5 MiB tensor, for each training example."""
+    keys_order = ('x', 'lengths', 'units', 'days', 'history', 'personal', 'activity')
+
+    def __init__(self, timeline, at, scope='current'):
+        self.timeline, self.at, self.scope = timeline, at, scope
+
+    def materialize(self):
+        return self.timeline.sample(self.at, self.scope)
+
+    def __getitem__(self, key):
+        return self.materialize()[key]
+
+    def __iter__(self):
+        return iter(self.keys_order)
+
+    def __len__(self):
+        return len(self.keys_order)
+
+
+def materialize(sample):
+    return sample.materialize() if isinstance(sample, LazySample) else sample

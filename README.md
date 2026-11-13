@@ -1,119 +1,78 @@
-# MacBook 生活ログサーバー
+# 生活ログ収集・三階層LSTM研究
 
-SwitchBot開閉センサーのBLE受信と、iPhoneのキーボード・活動回答のログをSQLiteに保存します。iPhoneはTailscale経由で統合ダッシュボードを取得します。
+SwitchBot開閉センサーとiOS [communication-keyboard](https://github.com/shunsuke-tanaka-creator/communication-keyboard) の入力・回答をSQLiteに収集し、状態5尺度と拠点・タスクを研究するPythonサーバーです。Macで収集、MacまたはUbuntuで学習・評価・推論します。研究日はAsia/Tokyo固定です。
 
-- MacBook: `100.106.185.3:8000`
-- iPhone: `100.124.206.1`
-- 参加者ID: `p001`
-- 想定設置場所: **玄関 / 寝室兼作業部屋**
+**既定は収集のみ（自動学習OFF）です。** GPS分類・行き先予測はありません。BLEの開閉だけで在宅や睡眠を断定しません。
 
-## 起動
+## 構成
+
+| パス | 役割 |
+| --- | --- |
+| `lifelog_server.py` | FastAPI、入力検証、起動CLI。従来のimport/起動入口を維持 |
+| `lifelog/` | SQLite保存、日時、BLE収集 |
+| `switchbot_contact_ble.py` | 共用BLEパーサーと診断CLI |
+| `research/data.py`, `model.py`, `train.py`, `inference.py`, `evaluation.py` | 特徴、モデル、学習、推論、オンライン評価 |
+| `research/context_*.py` | GPSなしの拠点・タスク学習と推論 |
+| `research/service.py`, `questions.py`, `insights.py`, `topology.py` | 研究API、質問予算、条件比較、生活パターン |
+| `research/io.py`, `provenance.py` | atomic保存、実験ID・環境・分割の記録 |
+| `research/cli.py`, `transfer.py`, `sample_data.py` | 同期、移行、隔離した合成データ生成 |
+| `tests/`, `test_lifelog_server.py` | 回帰テスト・API/モデルテスト |
+| `deploy/`, `docs/` | 常駐設定例と仕様・運用手順 |
+
+小規模のため全面的な `src/` 移行は行っていません。モデルのparameter名・ネットワーク構成は維持します。
+
+## 新規セットアップ
+
+Python 3.12を基準に、用途別の依存を使用します。既存環境の更新はDB・モデルをバックアップしてから行ってください。[依存関係と検証範囲](docs/dependencies.md)も参照。
 
 ```sh
-cd /Users/tanakashunsuke/Desktop/python/20261008
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.lock.txt
-./run_server.sh
-```
-
-MacとiPhoneのTailscaleを有効にします。MacのBluetoothをONにして、Python/ターミナルへのBluetoothアクセスを許可してください。Macを電源につなぎ、蓋を開けた状態で使用します。スクリプトは `caffeinate` でアイドルスリープを抑止しますが、蓋閉じ・明示的スリープ・ログアウト中は収集できません。
-
-このMacではLaunchAgentをインストール済みです。通常は手動の `run_server.sh` と二重起動しないでください。
-
-```sh
-.venv/bin/python service.py status   # 稼働状態
-.venv/bin/python service.py stop     # 今回のログイン中は停止
-.venv/bin/python service.py start    # 再開
-.venv/bin/python service.py install  # 初回登録 / 設定の再登録
-.venv/bin/python service.py remove   # 自動起動を解除（データは残す）
-```
-
-LaunchAgentはログイン時に起動し、異常終了時は再起動します。Tailscaleがまだ起動していない場合も再試行します。プログラムを変更した後は `stop` → `start` で反映します。ログは `data/server.stdout.log` / `data/server.stderr.log`、DBは `data/lifelog.sqlite3` です。
-
-## iPhoneの設定
-
-1. communication-keyboardの更新版をXcodeからiPhoneにインストールします。
-2. 「くらしのログ」を開き、接続先が `http://100.106.185.3:8000`、参加者IDが `p001` であることを確認します。以前URLを空欄にしていた場合は「このMacBookに接続する」を押します。別URLが保存されている場合は歯車の設定画面で変更します。
-3. キーボードをiOS設定で追加し、「フルアクセスを許可」をON、アプリのプライベートモードをOFFにすると入力ログを記録できます。
-4. 玄関のドアだけを開閉し、変化した機器をタップして「玄関」と名付けます。もう一方を「寝室兼作業部屋」と名付けます。名前はMacのDBに保存されます。
-5. 「活動を記録」で今の行動を入力できます。日付を選ぶとその日のまとめとタイムライン、各行を押すと保存されたログの詳細が開きます。
-
-iPhoneへの着信サーバーは不要です。「疑似センサー受信」はOFFのままで構いません。iPhoneアプリが閉じていても、Macが起動していればSwitchBotのログは蓄積します。アプリは前面で15秒ごとに取得し、通信断のときは保存済みデータであることを表示します。
-
-## 2台の固定登録（任意）
-
-初期状態は対応する開閉センサーを自動検出します。機器IDを確認後、対象を2台に限定する場合は次のように設定します。
-
-```sh
+.venv/bin/python -m pip install -r requirements.txt
 cp server-config.example.json server-config.json
+.venv/bin/python lifelog_server.py --config server-config.json --no-ble
 ```
 
-`devices` を実際に表示されたIDで設定し、サーバーを再起動してください。
+期待：依存導入が完了し、APIが `127.0.0.1:8000` で起動します。
+意図しない出力：`ERROR` / `ModuleNotFoundError` / `address already in use`。venv、Python版、既存プロセスを確認します。既存の `server-config.json` を例で上書きしないでください。
 
-```json
-"devices": {
-  "玄関センサーのBLE-UUID": {"name": "玄関", "participant_id": "p001"},
-  "部屋センサーのBLE-UUID": {"name": "寝室兼作業部屋", "participant_id": "p001"}
-}
-```
+iPhoneへ接続する場合は、設定の `host` をMacのTailscale IP、`allowed_clients` を接続するiPhone/UbuntuのIPへ明示設定します。iPhoneのBackend URLも同じMacへ設定します。新規インストール時のURLは空欄です。公開インターネット向けの認証・利用者間権限分離はありません。転送ヘッダーのIPは信用しません。
 
-macOSではMACアドレスではなくCoreBluetoothのUUIDです。場所を特定せずにIDを自動で割り当てることはしません。設定済みでも未受信の機器は「不明」と表示します。対応は既存コードと同じ非暗号化のSwitchBot開閉センサーです。他機種や暗号化された広告は読み取りません。
+BLE利用時は `--no-ble` を外し、MacのBluetoothとターミナルのBluetooth許可を有効にします。`devices` 未指定なら対応する非暗号化SwitchBot開閉センサーを検出します。機器IDを確認し、`devices` で対象を限定できます。macOSのIDはCoreBluetooth UUIDです。
 
-## 表示・集計の意味
+既存の `run_server.sh` と `service.py`（macOS LaunchAgent install/status/start/stop/remove）は利用できます。手動起動と常駐を二重起動しないでください。新規環境ではLaunchAgentは未登録です。収集はログイン・起動中のみで、蓋閉じやスリープ中の継続は保証しません。
 
-- 機器は最後の受信状態、電池残量、受信時刻を表示します。120秒受信しないと現在は「不明」です。初回観測は開閉回数に数えません。繰り返し届く同一状態はタイムラインに重複追加しません。
-- 日付境界はAsia/Tokyoです。入力セッションは終了日に集計します。タイムラインは100件ずつ、同一スナップショットに固定して追加取得します。
-- 現在の活動は、30分以内の本人の活動回答または2分以内の実際の打鍵のうち、新しい根拠を使います。回答には「本人の回答」、打鍵には「推定」と表示します。根拠が古ければ「不明」です。開閉だけで在宅・外出・睡眠を断定しません。
-- キーボードは60秒ごと、無入力60秒、非表示のいずれかでセッションを確定し送信します。iOSによる拡張の強制終了やフルアクセス無効中は、未確定の入力がサーバーに届かないことがあります。
-- 終了済み入力セッション・活動回答・文脈イベントはiPhoneの永続キューに残し、再送します。サーバーは参加者・イベント種別・IDで重複保存を防ぎます。以前の送信キューも移行します。旧版で送信キューに積まれなかったローカルログの全履歴を自動取り込みする機能はありません。
-- 歩数等はキーボード送信時点の端末Contextです。値の取得時刻を表示します。iPhone上のすべてのアプリの利用状況は取得しません。
+## API・保存
 
-## 接続と保存範囲
+| API | 用途 |
+| --- | --- |
+| `GET /health` | APIとBLEの状態 |
+| `POST /api/sessions` | 入力セッション。受信時刻をサーバーが付与 |
+| `POST /api/narrative-events`, `/api/context-events` | 回答と文脈。イベントIDで冪等 |
+| `POST /api/sensor-events`, `/api/activities` | 疑似センサーと活動回答 |
+| `GET /api/questions/pending/{participant}` | 質問があれば200、なければ204。設定済みiOSは204/通信失敗でローカル質問を発生させない |
+| `GET /api/dashboard/{participant}`, `/api/records/{participant}/{kind}/{id}` | 日別集計と詳細 |
+| `PUT /api/devices/{id}/name` | 機器名 |
+| `GET /api/export/{participant}` | ページ付き差分同期 |
+| `/research/{participant}`, `/research/{participant}/insights`, `/research/{participant}/context` | 研究画面 |
 
-サーバーはTailscale IPにのみbindし、実際の接続元IPが `allowed_clients` のものだけ受け付けます。リバースプロキシの転送ヘッダーは信用しません。現在はMac自身と指定iPhoneのみです。端末のTailscale IPが変わった場合は設定を更新してください。APIはこの1人用構成を想定し、複数利用者間の認証・権限分離を実装した公開サービスではありません。
+既定保存先は `data/lifelog.sqlite3`、モデルは `data/models/{participant}/{data_mode}/`、合成manifestは `data/sample/{sample-participant}/manifest.json`。DB、入力本文、ログ、モデルはGit対象外です。入力ログは確定本文と前後文脈を含みますが、モデルの文章特徴には確定本文のみを使用します。外部AIサービスへの送信はありません。保持期限や自動削除はありません。
 
-**入力イベントには、既存アプリが記録する確定本文・入力欄の前後文脈も含まれます。** 活動回答・端末Context・センサー状態とともにMacへ保存します。クラウドのAIやSwitchBotクラウドには送信しません。iPhoneのBackend URLを空にすると新しい通信を停止できます（端末内の記録と既存の未送信キューは残ります）。
+## 研究・互換性
 
-DBとログはgit対象外です。バックアップはサーバーを停止して `data/` をコピーしてください。削除する場合は停止後に必要なバックアップを取ってから行ってください。自動削除・自動保持期限はありません。
+- 状態：Micro（5分→最大1時間）・Meso（日）・Macro（固定週＋過去4週）のLSTM。現在/日全体の5尺度と補助活動分類。
+- 質問：既定4件は current 1、night 1、weather 1、place/task日替わり1。条件・観測不足では4件未満です。イベント起点の追加提案は上限を明示的に5以上へ増やした場合に使います。
+- 評価：**イベントごとのオンライン個人化（2=B）**。対象予測より前に受信済みの同日回答を利用できます。日単位凍結評価と混ぜません。
+- 復元：**推論checkpointと同条件での再学習（10=A）**。optimizer/RNG途中状態の厳密resumeはありません。
+- 特徴をv2へ更新したため旧v1 checkpointは `incompatible_checkpoint`。元ファイルとDBは削除せず、承認した環境で再学習・評価して切り替えます。既存の旧保存パスは引き続き探索します。
+
+詳細：[研究・評価](docs/research.md) / [拠点・タスク](docs/behavior-context.md) / [質問・イベント契約](docs/otenki-workflow.md) / [今回の変更と未検証事項](docs/audit-fixes.md)。
 
 ## 検証
 
 ```sh
-.venv/bin/python -m pytest -q
-curl http://100.106.185.3:8000/health
+python -B -m unittest discover -s tests -p test_audit_regressions.py -v
+python -m pytest -q
 ```
 
-テストは一時DBとBLE無効のAPIを使います。重複再送、参加者別取得、日本時間の日付境界、ページ分割中の追加、状態鮮度、機器名永続化、活動推定の期限、不正入力、接続元制限、DB再起動、BLEパケットを確認します。BLEを使わない開発起動は `./run_server.sh --no-ble --host 127.0.0.1 --port 8001` です。
-
-既存の診断CLIも使えます：`.venv/bin/python switchbot_contact_ble.py --seconds 30`。継続サーバーと同時にスキャンするより、サーバー停止中に実行してください。
-
-## API
-
-| API | 用途 |
-| --- | --- |
-| `GET /health` | API・BLEスキャナーの状態 |
-| `POST /api/sessions` | 既存iOS入力セッション |
-| `POST /api/narrative-events` | 回答1件 / 旧再送形式の配列 |
-| `POST /api/context-events` | 文脈イベント |
-| `POST /api/sensor-events` | 旧疑似センサーとの互換（実機BLEとは区別） |
-| `POST /api/activities` | 単独クライアント向け活動記録 |
-| `GET /api/questions/pending/{participant}` | 204。既存キーボードのローカル質問にフォールバック |
-| `GET /api/dashboard/{participant}?day=YYYY-MM-DD` | 状態、集計、タイムライン |
-| `GET /api/records/{participant}/{kind}/{id}` | 詳細ログ |
-| `PUT /api/devices/{id}/name` | `participant_id` と `name` で設置場所を保存 |
-
-開閉データの形式は [SwitchBot公式BLE仕様](https://github.com/OpenWonderLabs/SwitchBotAPI-BLE/blob/latest/devicetypes/contactsensor.md)、macOSの受信は [Bleak公式ドキュメント](https://bleak.readthedocs.io/en/latest/backends/macos.html) を参照しています。
-
-## 三階層LSTM研究機能（追加）
-
-Micro最大1時間・Meso1日・Macro固定週のモデル、現在/当日全体の5項目、個人基準比較、学習/比較評価、全種類エクスポート、Mac→Ubuntu差分同期、質問・可視化・訂正・休憩提案を追加した。Macでは従来の収集を継続し、Ubuntuで `research_enabled` を有効にする。**既定では自動学習しない。**
-
-設定、学習コマンド、検証済み事項と未実装/未検証事項は [docs/research.md](docs/research.md) を参照。
-
-## お天気分・自動トポロジー研究版
-
-三階層LSTMを維持し、気分4分類・条件付き疲労比較・曜日傾向・入力修正・匿名場所/生活クラス・共通質問予算を追加しました。[設定・起動・アルゴリズム・検証](docs/otenki-workflow.md) を参照してください。新画面は `/research/p001/insights` です。
-
-## GPSを使わない拠点・タスク推定
-
-拠点とタスクを別々に学習・確認し、Mac単体運用とUbuntuへの移行に対応します。旧GPS分類は停止しました。[仕様・導入・移行・検証範囲](docs/behavior-context.md) を参照してください。
+期待：軽量回帰テストは `OK`、全体テストは `passed`。前者はnumpy/FastAPI/httpx、後者は開発依存とPyTorchが必要です。
+意図しない出力：`FAILED` / `ERROR` / import失敗。合成データのテスト通過を実データ精度の根拠にはしません。

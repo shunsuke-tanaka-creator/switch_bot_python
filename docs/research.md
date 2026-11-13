@@ -1,6 +1,5 @@
 # 個人向け三階層LSTM — 実装・運用・未検証事項
 
-> 更新：場所分類はGPSを使わない拠点・タスク推定へ移行しました。現在の仕様・Mac運用は [behavior-context.md](behavior-context.md) を優先してください。以下のGPS訪問・場所マップの記述は旧方式です。
 
 
 ## 構成
@@ -31,7 +30,7 @@ Macが既存のBLE受信とiPhoneのログ受信を継続する。UbuntuがMac�
 
 ### Ubuntu（RTX 5060 Ti 16GB / RAM 32GB想定）
 
-Python 3.12以上と、GPUに対応するNVIDIAドライバー/CUDA版PyTorchを用意する。Blackwell対応のビルドをPyTorch公式のインストール選択画面で選ぶ： https://pytorch.org/get-started/locally/
+Python 3.12を基準とする環境と、GPUに対応するNVIDIAドライバー/CUDA版PyTorchを用意する。Blackwell対応のビルドをPyTorch公式のインストール選択画面で選ぶ： https://pytorch.org/get-started/locally/
 
 ```sh
 python3 -m venv .venv
@@ -97,9 +96,9 @@ HTTPでは `GET /api/research/{participant}/overview?data_mode=...`、`GET /api/
 .venv/bin/python -m research.cli --participant p001 personalize --epochs 20 --text-model /opt/models/multilingual-sentence-model
 ```
 
-- `train`: 日単位の時系列60/20/20分割。正規化は学習部分のみ。ラベルの回答完了日も分割前であることを確認する。学習とvalidationでcheckpointを選び、常駐再学習ではtestを評価しない。validationが改善した候補をatomic replaceで採用する。
+- `train`: 日単位の時系列60/20/20分割。正規化は学習部分のみ。ラベルの回答完了時刻とサーバー受信時刻の遅い方が分割境界前であることを確認する。学習とvalidationでcheckpointを選び、常駐再学習ではtestを評価しない。validationが改善した候補をatomic replaceで採用する。
 - `compare`: Microのみ、Micro+Meso、三階層、個人条件なし、文章なしを同じ日付分割・seedで評価し `comparison.json` に保存する。文字n-gramモードと意味表現モードを混同しない。
-- `personalize`: 固定モデルと、過去に回答済みのラベルで順次重みを更新するモデルを比較する。評価日の予測にその日の回答を使わず、予測結果と項目別MAE/nを `personalization.json` に保存する。
+- `personalize`: 固定モデルと、過去に回答済みのラベルで順次重みを更新するモデルを比較する。予測前に受信済みの同日過去回答も使うイベント単位のオンライン評価（prequential）とし、予測結果と項目別MAE/nを `personalization.json` に保存する。
 - 現在/1日全体それぞれの5項目のMAEと件数、活動のaccuracyを出力する。指標が改善したことは実際の比較結果で確認する。合成データの学習成功を研究成果と扱わない。
 - 全体で20状態回答・5日以上を学習開始の最低ゲートとする（統計的十分性の保証ではない）。表示はさらに項目ごと学習回答10件・validation回答3件以上が必要。未達は `insufficient_labels`。曜日差などは十分な週数と各条件の回答数を別途確認する。
 - 日内変化の正解はcurrentState、当日全体の正解はnightReflection。夜の回答を各作業の正解へ配布しない。質問表示時刻を予測のcutoffにする。未完了/後から到着したセッションを過去時点で既知の入力として扱わない。旧インポートには元の受信時刻がないため、セッション終了時刻を利用可能時刻とするという制限がある。
@@ -108,37 +107,34 @@ HTTPでは `GET /api/research/{participant}/overview?data_mode=...`、`GET /api/
 
 ## 質問・訂正・支援・可視化
 
-- 8〜21時台は現在の5項目を3時間以上の間隔で質問する。22〜23時台は当日全体を優先する。API取得時に質問IDを永続化し、最新1件を返す。iPhoneの表示時刻/回答時刻も保持する。睡眠中に通知で起こす仕組みは追加しない。
+- 既定4枠はcurrent/night/weather各1とplace/task交互1。currentは8〜21時台、nightは22〜23時台。上限5以上の場合のみイベント提案を優先する。API取得時に質問IDを永続化し、最新1件を返す。iPhoneの表示時刻/回答時刻も保持する。睡眠中に通知で起こす仕組みは追加しない。
 - 活動は既存の7大分類/24詳細活動を使用。訂正は開始/終了と活動、任意の5項目をappend-onlyで保存する。訂正の入力時刻より前には、その訂正を既知情報として使わない。現在の実装では訂正の状態得点は終了時点の追加ラベルとして扱う。
 - 4種類の比較はその時点より前の本人回答のみ。5件未満は比較不足。平均との差と標準化差を表示する。推定を新たな正解として基準へ入れない。
-- 支援は推定疲労4以上かつ全体基準から1標準偏差以上の場合に候補化する。1日2回まで/間隔1時間以上、閉じる・拒否・後回し・停止が可能。これは検証前の設定可能な研究ルールであり、最適な介入方策を学習したものではない。実物の家電/ロボットは操作しない。
+- 支援は観測に裏付けられた疲労・入力修正の変化を候補化する。1日2回まで/間隔1時間以上、閉じる・拒否・後回し・停止が可能。これは検証前の設定可能な研究ルールであり、最適な介入方策を学習したものではない。実物の家電/ロボットは操作しない。
 - PMTTは観測→作業時間枠→日→固定週を関連付け、推定・本人回答・訂正の由来を区別する。現状は時間枠に沿ったグラフ構築であり、未知の生活パターンのトポロジーを自動発見する学習器ではない。
 - iPhoneの「研究」画面はローカル配信のWeb画面。本人回答のグラフ、状態推定、4基準比較、訂正、エクスポート、PMTT、モデル検証状況を表示する。入力本文をグラフ表示する必要はない。
 
-## 検証済み / 未達・未検証
+## 再現性・checkpoint互換性
 
-### この環境で確認済み
+`run.json` はseed、epochs、optimizer設定、Python/依存版、Git SHA/dirty状態、train/validation/testの正確なID・予測時刻・利用可能時刻を保存します。同じseedでも異なるCPU/GPU・ライブラリ間のビット一致は保証しません。厳密な中断resumeは実装しません。
 
-- Python CPU上で51件のテストに合格。三層への勾配、未来データ不使用、日付/週境界、欠測マスク、checkpoint読込、5方式の比較、逐次個人適応比較、エクスポート/冪等同期、質問間隔、data_mode分離、サンプル生成の決定性・冪等性、モデルパス分離を確認。
-- 旧セッションJSONLの取り込みと、状態回答不足時の学習拒否を確認。本文そのものはリポジトリへ保存していない。
+自動再学習の判定にはデータ内容、特徴版、研究コード、実行環境、学習設定、文章モデル内容の実験IDを使用します。成果物が欠けた場合はskipしません。状態APIのtrain JSONには `force: true` を指定できます。CLIの `train` は毎回学習を試み、`context-train --force` はcontextのskipを解除します。
 
-### 未達・未検証（完了扱いにしない）
+v2特徴はevent timeで5分binへ配置し、**予測時刻までに収集サーバーへ届いたイベント**だけを利用します。ラベルの利用可能時刻は回答/訂正時刻と受信時刻の遅い方です。Mac→Ubuntu同期は元の収集サーバー受信時刻を保持します。従って、この評価は収集サーバーの情報集合を測り、Ubuntu転送遅延を含むエンドツーエンド評価ではありません。旧データには真の受信時刻がなく、回答/セッション終了時刻へfallbackする限界があります。
 
-1. **実データでの推定精度、三階層の優位性、個人適応の改善は未検証**。5項目の回答・活動・健康/センサーを含む全種類エクスポートが必要。週/曜日の効果には複数週が必要。
-2. RTX 5060 TiでのCUDA実行、速度・VRAM消費、Ubuntu本番常駐、Mac BLE→Ubuntu→iPhoneの実接続は未検証。
-3. この環境にXcode/iOS SDKがないため、iOSのコンパイル・XCTest・実機UI・WebKitダウンロードは未検証。Web画面はJSDOMでAPI応答との契約・DOM生成・停止操作を確認したが、実ブラウザーでの描画は未確認。アプリ側の手順を参照。
-4. ローカル多言語SentenceTransformerの実重みでの意味特徴はオプションとして実装したが、本環境ではモデル未配置のため動作/精度未検証。未指定時は文字特徴として明示する。
-5. 姿勢・振動・全アプリ利用状況・在室の確定は収集していない。2台のドアだけで本人の在室/外出を断定しない。
-6. 休憩提案の因果的効果/無作為割付比較、学習による介入最適化、学習したトポロジーによるPMTTパターン発見は未実装。現状は制約付きのルール提案と履歴記録。
-7. 履歴訂正で過去の全レコードを自動再解釈する仕組みは未実装。元記録を保持した追加ラベル/区間情報として扱う。
-8. 利用者間の認証・権限分離を備える公開サービスではない。元のTailscale単独利用者構成を維持する。
+`hierarchical-v2-received-cutoff` と `behavior-context-v2-received-cutoff` に更新しています。v1の入力意味と混ぜず、旧checkpointはエラー状態を返します。昇格前の `active.pt` を `previous.pt` に保持し、失敗した学習でactiveを置換しません。`run.json` / `status.json` は直近候補、checkpoint内のreportはその重みの条件です。長期の全実験履歴は別の `--models` ディレクトリで保持してください。
 
-## テスト
+外部文章モデルは設定側のパスを優先し、非hiddenファイル（`.bin`を含む）の内容IDを検証します。同じ内容を別のディレクトリへ移せます。実行時に重みをダウンロードしません。
+
+入力は日本語確定・英数字・記号を `commit.text` で扱います。英語候補は `replaces` に観測済みの接頭辞を記録し、同一窓内の重複を除きます。これは入力イベント特徴であり、編集後の全文を復元する機能ではありません。前後文脈、未確定kana、回答操作は文章特徴に入りません。
+
+## 検証範囲
+
+2026-11-12にLinux CPUの専用venvで、軽量回帰を含む88テストと構文/設定チェックが成功しました。合成データでの短い学習・評価・Checkpoint復元・オンライン個人化を含みます。実データ学習、推定精度、SentenceTransformer実運用重み、CUDA/MPS、Mac BLE、iOSとの実接続は未実行です。[依存](dependencies.md)、[変更一覧](audit-fixes.md)を参照してください。精度・速度・メモリの改善量は未測定です。
 
 ```sh
-python -m pip install -r requirements.txt
-# CPUテスト用PyTorch、または既に導入したCUDA版を使用
+python -B -m unittest discover -s tests -p test_audit_regressions.py -v
 python -m pytest -q
 ```
 
-API単体テストだけなら `pytest -q test_lifelog_server.py`。研究パイプラインのテストにはPyTorchが必要。
+期待：`OK` / 全テスト `passed`。意図しない出力：`FAILED` / `ERROR` / 依存のimport失敗。
