@@ -10,6 +10,8 @@ def settings(rows):
     value = dict(
         questions_enabled=True,
         interventions_enabled=True,
+        # 追加: 歩数同意とは独立した明示設定で、既定は無効。
+        exercise_proposals_enabled=False,
         daily_limit=4,
         intervention_limit=2,
         gap_minutes=60,
@@ -62,6 +64,9 @@ class QuestionQueue:
                 "gap",
                 "interventions_enabled",
                 "intervention_limit",
+                "exercise_proposals_enabled",
+                "exercise_data",
+                "exercise_cooldown",
                 "fatigue_high",
                 "fatigue_acute",
                 "typing_reason_chain",
@@ -162,8 +167,13 @@ class QuestionQueue:
                 if completed(r) or expiry(r) <= at:
                     continue
                 if (
-                    r["payload"]["kind"] == "breakCheck"
+                    r["payload"]["kind"] in ("breakCheck", "exerciseProposal")
                     and not pref["interventions_enabled"]
+                ):
+                    continue
+                if (
+                    r["payload"]["kind"] == "exerciseProposal"
+                    and not pref["exercise_proposals_enabled"]
                 ):
                     continue
                 if states.get(r["id"], ("",))[0] == "deferred":
@@ -231,7 +241,7 @@ class QuestionQueue:
             offered = [
                 r
                 for r in issued
-                if r["payload"]["kind"] == "breakCheck"
+                if r["payload"]["kind"] in ("breakCheck", "exerciseProposal")
                 and dt(r["at"]).date() == at.date()
             ]
             gate(
@@ -260,6 +270,7 @@ class QuestionQueue:
                 f"typing unusual={bool(typing.get('unusual'))}; recent reason={recent_reason or 'none'}",
             )
             kind = prompt = event = None
+            pmtt = None
             options = []
             ttl = 60
 
@@ -335,6 +346,95 @@ class QuestionQueue:
                     [(a["label"], "accept:" + a["action"]) for a in ranked]
                     + [("今はしない", "declined"), ("提案を停止", "stop")]
                 )
+            # 追加: 文脈条件付き歩数不足を同じ提案上限・停止・延期基盤へ統合する。
+            exercise = insight.get("exercise") or {}
+            exercise_ready = exercise.get("status") == "available" and exercise.get(
+                "low"
+            )
+            exercise_context = exercise.get("context") or {}
+            exercise_token = (
+                "exercise:"
+                + at.date().isoformat()
+                + ":"
+                + str(exercise_context.get("weekday"))
+                + ":"
+                + (exercise_context.get("place_id") or "unknown")
+            )
+            exercise_duplicate = any(
+                r["payload"]["kind"] == "exerciseProposal"
+                and r["payload"].get("eventType") == exercise_token
+                for r in issued
+            )
+            gate(
+                "exercise_proposals_enabled",
+                pref["exercise_proposals_enabled"],
+                "enabled"
+                if pref["exercise_proposals_enabled"]
+                else "disabled by preferences",
+            )
+            gate(
+                "exercise_data",
+                exercise_ready,
+                (
+                    f"status={exercise.get('status')}; low={bool(exercise.get('low'))}; "
+                    f"reason={exercise.get('reason', 'none')}"
+                ),
+            )
+            gate(
+                "exercise_cooldown",
+                not exercise_duplicate,
+                "same-day context already offered" if exercise_duplicate else "clear",
+            )
+            if (
+                kind is None
+                and pref["interventions_enabled"]
+                and pref["exercise_proposals_enabled"]
+                and len(offered) < pref["intervention_limit"]
+                and exercise_ready
+                and not exercise_duplicate
+            ):
+                event = exercise_token
+                kind = "exerciseProposal"
+                place = exercise_context.get("place_name") or exercise_context.get(
+                    "place_id"
+                )
+                condition = (
+                    f"{place}・{exercise_context.get('weekday_name', '同じ曜日')}"
+                    if place
+                    else (
+                        f"{exercise_context.get('weekday_name', '同じ曜日')}"
+                        "（拠点不明のため曜日×時刻へフォールバック）"
+                    )
+                )
+                prompt = (
+                    f"{condition}の普段より、同時刻までの歩数が"
+                    f"{exercise['shortage_steps']}歩少なめです。運動候補を選びますか？"
+                )
+                options = opts(
+                    [
+                        (
+                            f"{candidate['label']} {candidate['minutes']}分"
+                            f"（{candidate['mets']:.1f} METs）",
+                            "accept:exercise:" + candidate["action"],
+                        )
+                        for candidate in exercise["candidates"]
+                    ]
+                    + [("今はしない", "declined"), ("提案を停止", "stop")]
+                )
+                pmtt = dict(
+                    condition=exercise_context,
+                    usual_steps=exercise["usual_steps"],
+                    today_steps=exercise["today_steps"],
+                    shortage_steps=exercise["shortage_steps"],
+                    cadence_steps_per_minute=exercise["cadence_steps_per_minute"],
+                    walking_equivalent_minutes=exercise[
+                        "walking_equivalent_minutes"
+                    ],
+                    baseline_days=exercise["baseline_days"],
+                    provisional=exercise["provisional"],
+                    candidates=exercise["candidates"],
+                    evidence_id=exercise["evidence_id"],
+                )
             if kind is None and typing.get("unusual") and recent_reason is None:
                 token = "typing:" + typing["evidence_id"]
                 if not any(r["payload"].get("eventType") == token for r in issued):
@@ -351,7 +451,9 @@ class QuestionQueue:
                     )
             # Four default opportunities: context, weather, current, night.
             # Event-triggered proposals remain available with an explicitly larger budget.
-            if pref['daily_limit'] <= 4 or at.hour >= 22:
+            if kind != "exerciseProposal" and (
+                pref['daily_limit'] <= 4 or at.hour >= 22
+            ):
                 kind = None
             # One shared budget/gap for all surfaces. Alternate axes across days.
             if kind is None and at.hour < 22:
@@ -458,6 +560,8 @@ class QuestionQueue:
             )
             if kind == "supportOutcome":
                 q["relatedID"] = event.split(":", 1)[1]
+            if pmtt is not None:
+                q["pmtt"] = pmtt
             if persist:
                 self.store.save("question_issued", q["id"], p, at, q)
             return result(q)

@@ -203,12 +203,20 @@ class Engine:
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
         rows=self.rows(p,data_mode_);nodes={};edges=[]
         for r in rows:
-            if r['kind'] not in {'session','narrative','switchbot','correction','inference'}:continue
+            if r['kind'] not in {'session','narrative','switchbot','correction','inference','step_snapshot'}:continue
             at=dt(r['at']);week='week:'+monday(at).date().isoformat();day='day:'+at.date().isoformat();work='work:'+at.replace(minute=0,second=0,microsecond=0).isoformat()
             for key,kind in [(week,'Pattern'),(day,'Day'),(work,'StateEpisode')]:nodes[key]=dict(id=key,kind=kind)
             key=r['kind']+':'+r['id'];nodes[key]=dict(id=key,kind='Observation',source=r['kind'],at=r['at'])
             edges.extend([dict(source=key,target=work,kind='provenance'),dict(source=work,target=day,kind='part_of'),dict(source=day,target=week,kind='part_of')])
             if r['kind']=='correction':nodes[key]['interval']=[r['payload']['start'],r['payload']['end']]
+        # 追加: 運動提案の文脈・通常歩数・不足・METs候補をPMTTへ残す。
+        for r in rows:
+            if r['kind']!='question_issued' or r['payload'].get('kind')!='exerciseProposal':continue
+            key='proposal:'+r['id'];evidence=r['payload']['pmtt']
+            nodes[key]=dict(id=key,kind='ExerciseProposal',at=r['at'],evidence=evidence)
+            source='step_snapshot:'+evidence['evidence_id']
+            if source not in nodes:source='session:'+evidence['evidence_id']
+            if source in nodes:edges.append(dict(source=source,target=key,kind='supports'))
         from .context_data import catalog
         classes,aliases=catalog(rows,dt(utc()))
         from .context_data import resolve

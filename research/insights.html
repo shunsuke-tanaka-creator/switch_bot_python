@@ -169,6 +169,8 @@
           <label><input id="questions" type="checkbox" />自動質問</label
           ><label
             ><input id="interventions" type="checkbox" />休憩などの提案</label
+          ><label
+            ><input id="exerciseProposals" type="checkbox" />歩数不足時の運動提案</label
           >
         </div>
         <p id="budget"></p>
@@ -339,6 +341,9 @@
             .join(" ／ ");
           $("questions").checked = d.preferences.questions_enabled;
           $("interventions").checked = d.preferences.interventions_enabled;
+          // 追加: 歩数データ提供同意とは独立した運動提案設定を表示する。
+          $("exerciseProposals").checked =
+            d.preferences.exercise_proposals_enabled;
           $("budget").textContent =
             `質問は1日${d.preferences.daily_limit}回、うち提案${d.preferences.intervention_limit}回まで。間隔${d.preferences.gap_minutes}分。`;
           $("trends").replaceChildren();
@@ -401,6 +406,7 @@
         $("defer").disabled = value;
         $("questions").disabled = value;
         $("interventions").disabled = value;
+        $("exerciseProposals").disabled = value;
         for (const button of $("weatherButtons").querySelectorAll("button"))
           button.disabled = value;
         $("dashboardLink").href =
@@ -423,6 +429,7 @@
       for (const [id, key] of [
         ["questions", "questions_enabled"],
         ["interventions", "interventions_enabled"],
+        ["exerciseProposals", "exercise_proposals_enabled"],
       ])
         $(id).onchange = () =>
           emit("preferences", { [key]: $(id).checked })

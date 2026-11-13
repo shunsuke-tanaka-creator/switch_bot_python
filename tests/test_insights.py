@@ -9,9 +9,16 @@ from research.data import Timeline, dt, F
 from research.events import ResearchEvent
 from research.baseline import conditional, weekday_trends
 from research.topology import GrowingMap, typing_windows, behavior_map
-from research.insights import InsightEngine, fatigue_change, typing_change, recommend
+from research.insights import (
+    InsightEngine,
+    exercise_candidates,
+    fatigue_change,
+    recommend,
+    step_shortage,
+    typing_change,
+)
 from research.questions import QuestionQueue, settings
-from research.service import export_page, ingest_page
+from research.service import Engine, export_page, ingest_page
 
 
 AT = dt("2026-10-29T16:40:00+09:00")
@@ -85,6 +92,30 @@ def session(at, n=120, corrections=0, purpose=None, device="phone"):
     )
 
 
+# 追加: 参加者の入力原文を含まない、日累積歩数だけの合成セッション。
+def step_session(at, steps, *, place_id=None, measurement_at=None, identifier=None):
+    measured = measurement_at or at - timedelta(minutes=1)
+    context = dict(
+        step_count=steps,
+        measurement_updated_at=dict(step_count=measured.isoformat()),
+    )
+    if place_id:
+        context["place_id"] = place_id
+    return record(
+        "session",
+        identifier or f"steps-{at.isoformat()}-{place_id}",
+        at,
+        dict(
+            session_id=identifier or f"steps-{at.isoformat()}-{place_id}",
+            device_id="synthetic-phone",
+            started_at=(at - timedelta(minutes=2)).isoformat(),
+            ended_at=at.isoformat(),
+            events=[],
+            context=context,
+        ),
+    )
+
+
 def put(store, rows):
     for r in rows:
         store.save(r["kind"], r["id"], "p001", dt(r["at"]), r["payload"])
@@ -107,6 +138,7 @@ def put(store, rows):
         ),
         ("question_state", {"question_id": "q", "state": "deferred"}),
         ("preferences", {"daily_limit": 4.0, "questions_enabled": False}),
+        ("preferences", {"exercise_proposals_enabled": True}),
     ],
 )
 def test_event_contract(kind, payload):
@@ -319,6 +351,94 @@ def test_typing_daily_unusual_requires_current_and_previous_valid_day():
         typing_window(0, 50, 0.2),
     ]
     assert typing_change(two_days, AT)["unusual"]
+
+
+# 追加: 100歩/分とMETs比を使い、候補は最大4件を5分単位で切り上げる。
+def test_exercise_candidates_use_mets_and_five_minute_rounding():
+    candidates = exercise_candidates(3000)
+    assert len(candidates) == 4
+    assert [(x["action"], x["mets"], x["minutes"]) for x in candidates] == [
+        ("walking", 3.0, 30),
+        ("brisk_walking", 4.3, 25),
+        ("stair_climbing", 8.0, 15),
+        ("cycling", 6.8, 15),
+    ]
+
+
+# 追加: 同曜日・同拠点・同時刻までの分布だけで歩数不足を判定する。
+def test_step_shortage_uses_weekday_place_time_context():
+    at = dt("2026-11-09T16:00:00+09:00")
+    rows = [
+        step_session(
+            at - timedelta(days=7 * week, minutes=5),
+            4000 + week * 20,
+            place_id="place_lab",
+        )
+        for week in range(1, 6)
+    ]
+    rows += [
+        step_session(
+            at - timedelta(days=7 * week, minutes=4),
+            700,
+            place_id="place_home",
+            identifier=f"other-{week}",
+        )
+        for week in range(1, 6)
+    ]
+    rows.append(step_session(at, 1000, place_id="place_lab", identifier="today"))
+    result = step_shortage(rows, at)
+    assert result["status"] == "available" and result["low"]
+    assert result["context"]["basis"] == "weekday_place_time"
+    assert result["context"]["place_id"] == "place_lab"
+    assert result["baseline_days"] == 5
+    assert result["usual_steps"] == 4060
+    assert result["shortage_steps"] == 3060
+    assert "provisional" in result and result["provisional"] is False
+
+
+# 追加: 拠点不明時だけ曜日×時刻へフォールバックする。
+def test_step_shortage_falls_back_only_when_current_place_is_unknown():
+    at = dt("2026-11-09T16:00:00+09:00")
+    history = [
+        step_session(
+            at - timedelta(days=7 * week, minutes=5),
+            3000,
+            place_id="place_home" if week % 2 else "place_lab",
+        )
+        for week in range(1, 6)
+    ]
+    fallback = step_shortage(
+        history + [step_session(at, 1000, identifier="today-unknown")], at
+    )
+    assert fallback["status"] == "available" and fallback["low"]
+    assert fallback["context"]["basis"] == "weekday_time_fallback"
+    known = step_shortage(
+        history
+        + [step_session(at, 1000, place_id="place_lab", identifier="today-known")],
+        at,
+    )
+    assert known["status"] == "insufficient_data"
+    assert known["reason"] == "context_baseline_too_short"
+    assert known["baseline_days"] == 2
+
+
+# 追加: 古い歩数値は通常値にも当日判定にも使用しない。
+def test_step_shortage_rejects_stale_measurements():
+    at = dt("2026-11-09T16:00:00+09:00")
+    rows = [
+        step_session(
+            at - timedelta(days=7 * week),
+            3000,
+            measurement_at=at - timedelta(days=7 * week, hours=2),
+        )
+        for week in range(1, 6)
+    ]
+    rows.append(
+        step_session(at, 1000, measurement_at=at - timedelta(hours=2))
+    )
+    result = step_shortage(rows, at)
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "current_step_measurement_missing_or_stale"
 
 
 def test_fatigue_persistence_requires_coverage_and_separate_five_minute_bins():
@@ -535,6 +655,82 @@ def test_typing_reason_precedes_typing_only_intervention(reason, expected):
         ],
     )
     assert queue.pending("p001", t + timedelta(minutes=61))["kind"] == expected
+    store.close()
+
+
+# 追加: 運動提案は既定無効で、有効時も同日同文脈では一度だけ発行する。
+def test_exercise_proposal_preference_pmtt_and_same_context_cooldown(tmp_path):
+    exercise = dict(
+        status="available",
+        low=True,
+        provisional=False,
+        baseline_days=5,
+        context=dict(
+            basis="weekday_place_time",
+            weekday=0,
+            place_id="place_lab",
+            place_name="研究室",
+            time="09:00",
+        ),
+        usual_steps=4000,
+        today_steps=1000,
+        shortage_steps=3000,
+        cadence_steps_per_minute=100,
+        walking_equivalent_minutes=30.0,
+        candidates=exercise_candidates(3000),
+        evidence_id="synthetic-today",
+    )
+
+    class Fixed:
+        def snapshot(self, p, at):
+            return dict(fatigue={}, typing={}, exercise=exercise)
+
+    t = dt("2026-11-09T09:00:00+09:00")
+    store = Store(":memory:")
+    queue = QuestionQueue(store, Fixed())
+    assert queue.pending("p001", t)["kind"] == "weatherMood"
+    store.close()
+
+    store = Store(":memory:")
+    queue = QuestionQueue(store, Fixed())
+    put(
+        store,
+        [
+            event(
+                "preferences",
+                "exercise-on",
+                t - timedelta(days=1),
+                dict(exercise_proposals_enabled=True),
+            )
+        ],
+    )
+    question = queue.pending("p001", t)
+    assert question["kind"] == "exerciseProposal"
+    assert question["pmtt"]["condition"]["place_id"] == "place_lab"
+    assert question["pmtt"]["cadence_steps_per_minute"] == 100
+    assert len(question["pmtt"]["candidates"]) == 4
+    put(
+        store,
+        [
+            record(
+                "narrative",
+                question["id"],
+                t + timedelta(minutes=1),
+                dict(
+                    question=dict(kind="exerciseProposal"),
+                    answer=dict(label="declined"),
+                ),
+            )
+        ],
+    )
+    followup = queue.pending("p001", t + timedelta(minutes=61))
+    assert followup["kind"] != "exerciseProposal"
+    graph = Engine(store, dict(research_models=str(tmp_path))).pmtt("p001")
+    proposal = next(
+        node for node in graph["nodes"] if node["kind"] == "ExerciseProposal"
+    )
+    assert proposal["evidence"]["usual_steps"] == 4000
+    assert proposal["evidence"]["candidates"][0]["mets"] == 3.0
     store.close()
 
 

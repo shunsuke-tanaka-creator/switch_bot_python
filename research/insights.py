@@ -1,10 +1,260 @@
 """Personal change detectors and automatic topology alongside the three LSTMs."""
 
 from datetime import timedelta
+import math
 import numpy as np
 from .data import dt
 from .baseline import conditional, weekday_trends
 from .topology import available_rows, typing_windows, behavior_map
+
+
+# 追加: Compendium系の一般的なMETs参照値。医療的な処方値ではない。
+EXERCISE_METS = (
+    ("walking", "歩行", 3.0),
+    ("brisk_walking", "速歩", 4.3),
+    ("stair_climbing", "階段上り", 8.0),
+    ("cycling", "自転車", 6.8),
+    ("jogging", "ジョギング", 7.0),
+    ("stretching", "ストレッチ", 2.3),
+    ("radio_calisthenics", "ラジオ体操", 4.0),
+)
+
+
+# 追加: 不足歩数を100歩/分の歩行相当にし、活動別METs比で5分単位へ切り上げる。
+def exercise_candidates(shortage_steps, limit=4):
+    walking_minutes = shortage_steps / 100
+    return [
+        dict(
+            action=action,
+            label=label,
+            mets=mets,
+            minutes=max(5, math.ceil(walking_minutes * (3.0 / mets) / 5) * 5),
+        )
+        for action, label, mets in EXERCISE_METS[:limit]
+    ]
+
+
+# 追加: セッションContextから鮮度を確認できる日累積歩数だけを保存する。
+def persist_step_snapshot(store, participant, session_id, payload, fresh_seconds=900):
+    context = payload.get("context") or {}
+    measured_at = (context.get("measurement_updated_at") or {}).get("step_count")
+    steps = context.get("step_count")
+    if measured_at is None or type(steps) not in (int, float) or not math.isfinite(steps):
+        return False
+    measured_at = dt(measured_at)
+    ended_at = dt(payload["ended_at"])
+    if steps < 0 or not timedelta(0) <= ended_at - measured_at <= timedelta(
+        seconds=fresh_seconds
+    ):
+        return False
+    place = context.get("place")
+    place_id = (
+        context.get("place_id")
+        or context.get("context_place_id")
+        or (place.get("id") if isinstance(place, dict) else None)
+    )
+    return store.save(
+        "step_snapshot",
+        session_id,
+        participant,
+        measured_at,
+        dict(
+            step_count=float(steps),
+            measurement_at=measured_at.isoformat(),
+            session_at=ended_at.isoformat(),
+            source_session_id=session_id,
+            place_id=place_id,
+            received_at=payload.get("received_at", ended_at.isoformat()),
+        ),
+    )
+
+
+# 追加: 既存sessionと新しいstep_snapshotを同じ観測形式にし、拠点推定を対応付ける。
+def step_observations(
+    rows, at, place_window_minutes=10, measurement_fresh_seconds=900
+):
+    visible = available_rows(rows, at)
+    context_rows = [r for r in visible if r["kind"] == "context_inference"]
+    from .context_data import catalog, resolve
+
+    _, aliases = catalog(visible, at)
+
+    def inferred_place(measured_at, participant):
+        candidates = [
+            r
+            for r in context_rows
+            if r.get("participant") == participant
+            if abs((dt(r["at"]) - measured_at).total_seconds())
+            <= place_window_minutes * 60
+            and (r["payload"].get("place") or {}).get("id")
+        ]
+        if not candidates:
+            return None, None
+        row = min(candidates, key=lambda r: abs((dt(r["at"]) - measured_at).total_seconds()))
+        place = row["payload"]["place"]
+        return resolve(aliases["place"], place["id"]), place.get("name")
+
+    observations = {}
+    for r in visible:
+        payload = r["payload"]
+        if r["kind"] == "step_snapshot":
+            measured_at = dt(payload["measurement_at"])
+            session_at = dt(payload["session_at"])
+            steps = payload["step_count"]
+            source_id = payload["source_session_id"]
+            place_id = payload.get("place_id")
+            place_name = None
+            explicit = True
+        elif r["kind"] == "session":
+            context = payload.get("context") or {}
+            measured = (context.get("measurement_updated_at") or {}).get("step_count")
+            steps = context.get("step_count")
+            if (
+                measured is None
+                or type(steps) not in (int, float)
+                or not math.isfinite(steps)
+                or steps < 0
+            ):
+                continue
+            measured_at = dt(measured)
+            session_at = dt(payload["ended_at"])
+            source_id = payload.get("session_id", r["id"])
+            place = context.get("place")
+            place_id = (
+                context.get("place_id")
+                or context.get("context_place_id")
+                or (place.get("id") if isinstance(place, dict) else None)
+            )
+            place_name = place.get("name") if isinstance(place, dict) else None
+            explicit = False
+        else:
+            continue
+        if measured_at > at or session_at > at:
+            continue
+        if not timedelta(0) <= session_at - measured_at <= timedelta(
+            seconds=measurement_fresh_seconds
+        ):
+            continue
+        if place_id:
+            place_id = resolve(aliases["place"], place_id)
+        else:
+            place_id, place_name = inferred_place(
+                measured_at, r.get("participant")
+            )
+        observation = dict(
+            at=measured_at,
+            session_at=session_at,
+            steps=float(steps),
+            source_id=source_id,
+            participant=r.get("participant"),
+            place_id=place_id,
+            place_name=place_name,
+        )
+        observation_id = (r.get("participant"), source_id)
+        if explicit or observation_id not in observations:
+            observations[observation_id] = observation
+    return sorted(observations.values(), key=lambda x: (x["at"], x["source_id"]))
+
+
+# 追加: 同曜日×同拠点×同時刻の中央値・25パーセンタイルで歩数不足を判定する。
+def step_shortage(
+    rows,
+    at,
+    *,
+    provisional_days=3,
+    formal_days=5,
+    fresh_seconds=900,
+    time_tolerance_minutes=30,
+    minimum_shortage_steps=500,
+    minimum_shortage_fraction=0.25,
+):
+    at = dt(at)
+    observations = step_observations(
+        rows, at, measurement_fresh_seconds=fresh_seconds
+    )
+    today = at.date()
+    current = next(
+        (
+            value
+            for value in reversed(observations)
+            if value["at"].date() == today
+            and timedelta(0) <= at - value["at"] <= timedelta(seconds=fresh_seconds)
+            and timedelta(0)
+            <= at - value["session_at"]
+            <= timedelta(seconds=fresh_seconds)
+        ),
+        None,
+    )
+    if current is None:
+        return dict(
+            status="insufficient_data",
+            low=False,
+            reason="current_step_measurement_missing_or_stale",
+        )
+    place_id = current["place_id"]
+    basis = "weekday_place_time" if place_id else "weekday_time_fallback"
+    target_seconds = at.hour * 3600 + at.minute * 60 + at.second
+    days = {}
+    for value in observations:
+        date = value["at"].date()
+        if date >= today or value["at"].weekday() != at.weekday():
+            continue
+        if place_id and value["place_id"] != place_id:
+            continue
+        seconds = value["at"].hour * 3600 + value["at"].minute * 60 + value["at"].second
+        lag = target_seconds - seconds
+        if not 0 <= lag <= time_tolerance_minutes * 60:
+            continue
+        previous = days.get(date)
+        if previous is None or value["at"] > previous["at"]:
+            days[date] = value
+    baseline = [value["steps"] for _, value in sorted(days.items())]
+    baseline_days = len(baseline)
+    context = dict(
+        basis=basis,
+        weekday=at.weekday(),
+        weekday_name=("月", "火", "水", "木", "金", "土", "日")[
+            at.weekday()
+        ]
+        + "曜日",
+        place_id=place_id,
+        place_name=current["place_name"],
+        time=at.strftime("%H:%M"),
+    )
+    if baseline_days < provisional_days:
+        return dict(
+            status="insufficient_data",
+            low=False,
+            reason="context_baseline_too_short",
+            baseline_days=baseline_days,
+            required_days=provisional_days,
+            context=context,
+        )
+    usual = float(np.median(baseline))
+    lower_quartile = float(np.quantile(baseline, 0.25))
+    shortage = max(0, int(round(usual - current["steps"])))
+    low = bool(
+        current["steps"] < lower_quartile
+        and shortage >= minimum_shortage_steps
+        and shortage >= usual * minimum_shortage_fraction
+    )
+    result = dict(
+        status="available",
+        low=low,
+        provisional=baseline_days < formal_days,
+        baseline_days=baseline_days,
+        context=context,
+        usual_steps=int(round(usual)),
+        lower_quartile_steps=int(round(lower_quartile)),
+        today_steps=int(round(current["steps"])),
+        shortage_steps=shortage,
+        cadence_steps_per_minute=100,
+        walking_equivalent_minutes=round(shortage / 100, 1),
+        candidates=exercise_candidates(shortage) if low else [],
+        evidence_id=current["source_id"],
+        note="research threshold; fresh session-backed cumulative steps, not device-carry proof",
+    )
+    return result
 
 
 def fatigue_change(rows, at, base, prediction, delta_min=1.0, z_min=2.0):
@@ -240,7 +490,30 @@ class InsightEngine:
             delta_min=self.config.get("fatigue_delta", 1.0),
             z_min=self.config.get("fatigue_z", 2.0),
         )
-        return dict(version="insights-v1", at=at.isoformat(), **fixed, fatigue=fatigue)
+        # 追加: モデル入力とは独立した提案用の歩数検出器。
+        exercise = step_shortage(
+            rows,
+            at,
+            provisional_days=self.config.get("exercise_baseline_provisional_days", 3),
+            formal_days=self.config.get("exercise_baseline_days", 5),
+            fresh_seconds=self.config.get("exercise_step_fresh_seconds", 900),
+            time_tolerance_minutes=self.config.get(
+                "exercise_baseline_time_tolerance_minutes", 30
+            ),
+            minimum_shortage_steps=self.config.get(
+                "exercise_minimum_shortage_steps", 500
+            ),
+            minimum_shortage_fraction=self.config.get(
+                "exercise_minimum_shortage_fraction", 0.25
+            ),
+        )
+        return dict(
+            version="insights-v1",
+            at=at.isoformat(),
+            **fixed,
+            fatigue=fatigue,
+            exercise=exercise,
+        )
 
 
 ACTIONS = {

@@ -35,6 +35,23 @@ def test_upload_retry_is_idempotent_and_detail_isolated(setup):
     assert client.get("/api/dashboard/p002").json()["timeline"] == []
 
 
+# 追加: 新しいセッションの鮮度付き歩数を提案用スナップショットとして冪等保存する。
+def test_session_saves_step_snapshot_idempotently(setup):
+    client, store = setup
+    at = datetime.now(timezone.utc)
+    payload = session(at, identifier="step-session")
+    payload["context"] = dict(
+        step_count=2345,
+        measurement_updated_at=dict(step_count=stamp(at - timedelta(seconds=20))),
+    )
+    assert client.post("/api/sessions", json=payload).json()["inserted"] is True
+    assert client.post("/api/sessions", json=payload).json()["inserted"] is False
+    snapshots = [r for r in store.rows("p001") if r["kind"] == "step_snapshot"]
+    assert len(snapshots) == 1
+    assert snapshots[0]["payload"]["step_count"] == 2345
+    assert snapshots[0]["payload"]["source_session_id"] == "step-session"
+
+
 def test_japan_day_boundary_and_pagination_snapshot(setup):
     client, _ = setup
     midnight = datetime(2026, 1, 2, tzinfo=JST)

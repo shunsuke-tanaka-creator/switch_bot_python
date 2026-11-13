@@ -50,6 +50,8 @@ class ResearchEvent(BaseModel):
                 {
                     "questions_enabled",
                     "interventions_enabled",
+                    # 追加: 歩数データ提供同意とは分離した運動提案の設定。
+                    "exercise_proposals_enabled",
                     "daily_limit",
                     "intervention_limit",
                     "gap_minutes",
