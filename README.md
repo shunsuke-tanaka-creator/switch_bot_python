@@ -76,3 +76,7 @@ python -m pytest -q
 
 期待：軽量回帰テストは `OK`、全体テストは `passed`。前者はnumpy/FastAPI/httpx、後者は開発依存とPyTorchが必要です。
 意図しない出力：`FAILED` / `ERROR` / import失敗。合成データのテスト通過を実データ精度の根拠にはしません。
+
+## オフラインのモデル高度化実験
+
+評価ベースライン・参加者単位MAE_macro・SSL・部分プーリング・3条件prequentialは、明示フラグ付きの `research.cli experiment` で利用できます。すべて既定無効で、本番モデルへ自動昇格しません。サンプルのみの実行方法と時刻境界は[実験ガイド](docs/model-experiments.md)を参照してください。
