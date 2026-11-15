@@ -72,6 +72,9 @@ def sync(store,source,participant,state_path,client=None):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--db',default='data/lifelog.sqlite3');p.add_argument('--participant',default='p001')
     sub=p.add_subparsers(dest='command',required=True)
+    # Import only the parser here; optional ML dependencies stay lazy for server/export users.
+    from .experiment_cli import add_parser
+    add_parser(sub)
     ex=sub.add_parser('export');ex.add_argument('path')
     im=sub.add_parser('import');im.add_argument('path')
     sy=sub.add_parser('sync');sy.add_argument('--source',required=True);sy.add_argument('--state',default='data/replication.json');sy.add_argument('--watch',action='store_true')
@@ -86,6 +89,9 @@ def main():
     sample=sub.add_parser('generate-sample');sample.add_argument('--calendar',required=True);sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
     sample.add_argument('--manifest',default=None);sample.add_argument('--dry-run',action='store_true');sample.add_argument('--include-today',action='store_true')
     args=p.parse_args();identifier(args.participant)
+    if args.command=='experiment':
+        from .experiment_cli import run
+        print(json.dumps(run(args),ensure_ascii=False,allow_nan=False));return
     if args.command=='generate-sample' and args.dry_run:
         from .sample_data import generate_sample
         result=generate_sample(args.calendar,args.sample_participant,args.participant,manifest_path=args.manifest,

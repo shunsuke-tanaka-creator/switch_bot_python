@@ -30,7 +30,8 @@ class HierarchicalLSTM(nn.Module):
         self.current=nn.Linear(hidden,5);self.daily=nn.Linear(hidden,5)
         self.activity=nn.Linear(hidden,len(ACTIVITIES))
 
-    def forward(self,b):
+    def representations(self,b):
+        """Expose the shared hierarchy without adding parameters or changing checkpoints."""
         x=b['x']; history=b['history']
         if not self.settings['use_text']:
             x=x.clone();x[...,-TEXT_DIM:]=0;history=history.clone();history[...,-TEXT_DIM:]=0
@@ -48,5 +49,10 @@ class HierarchicalLSTM(nn.Module):
         current=work if variant=='micro' else self.top_work(torch.cat([work,daily,macro],-1))
         if self.settings['adaptation']:
             person=self.personal(b['personal']);current=current+person;daily=daily+person
+        return dict(current=current,daily=daily,micro=micro,meso=meso,macro=macro)
+
+    def forward(self,b):
+        encoded=self.representations(b)
+        current,daily=encoded['current'],encoded['daily']
         return dict(current=1+4*torch.sigmoid(self.current(current)),daily=1+4*torch.sigmoid(self.daily(daily)),
                     activity=self.activity(current),embedding=current)

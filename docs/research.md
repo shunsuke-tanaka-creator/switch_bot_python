@@ -138,3 +138,7 @@ python -m pytest -q
 ```
 
 期待：`OK` / 全テスト `passed`。意図しない出力：`FAILED` / `ERROR` / 依存のimport失敗。
+
+## 明示的に有効化するモデル高度化実験
+
+[評価・SSL・部分プーリング](model-experiments.md)に、参加者単位のMAE_macro、4ベースライン、厳密な学習/SSLカットオフ、共有Encoder、5次元個人バイアス、3条件prequentialを記載しています。新しい `experiment` コマンドは本番の学習・推論・既存 `personalize` から分離され、全機能フラグは既定無効です。
