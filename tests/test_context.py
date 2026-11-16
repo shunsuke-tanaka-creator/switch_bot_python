@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, timezone
 import json
 import numpy as np
 import pytest
@@ -7,12 +7,22 @@ from fastapi.testclient import TestClient
 from lifelog_server import Store, create_app
 from research.data import dt, Timeline, F
 from research.train import batch
-from research.context_data import observations, annotations, label_at, catalog, fresh
+from research.context_data import (
+    observations,
+    annotations,
+    label_at,
+    catalog,
+    fresh,
+    node_profiles,
+    node_descriptions,
+    question_presentation,
+)
 from research.context_model import ContextLSTM, relation_loss
 from research.context_learning import train_context
 from research.context_service import ContextEngine
 from research.service import Engine
 from research.transfer import export_bundle, import_bundle
+from research.questions import render_context_check
 
 
 def record(kind, key, at, payload):
@@ -204,6 +214,249 @@ def test_merge_split_and_rename_preserve_originals():
     assert json.dumps(rows) == original
 
 
+def test_node_profiles_use_self_reports_with_correction_and_receipt_cutoffs():
+    end = dt("2026-09-07T10:00:00+09:00")
+    original = label("place", "place_old", end - timedelta(hours=1), end)
+    duplicate = dict(original, id="duplicate", at=(end + timedelta(seconds=2)).isoformat())
+    correction = label(
+        "place", "place_new", end - timedelta(hours=1), end, end + timedelta(minutes=10)
+    )
+    correction["payload"]["received_at"] = (end + timedelta(days=2)).isoformat()
+    rows = [
+        original,
+        duplicate,
+        correction,
+        label("task", "task_work", end - timedelta(hours=1), end),
+        record(
+            "context_inference",
+            "model-only",
+            end,
+            dict(place=dict(id="place_old", count=1000, days=1000)),
+        ),
+        record(
+            "research_event",
+            "merge",
+            end + timedelta(hours=1),
+            dict(
+                kind="context_merge",
+                received_at=(end + timedelta(days=3)).isoformat(),
+                payload=dict(
+                    axis="place", source_id="place_new", target_id="place_merged"
+                ),
+            ),
+        ),
+    ]
+    before = node_profiles(rows, end + timedelta(days=1))
+    assert before["place"]["place_old"] == dict(
+        confirmed_count=1,
+        confirmed_days=1,
+        last_confirmed_at=end,
+        dominant_band=None,
+    )
+    assert "place_new" not in before["place"]
+    after = node_profiles(rows, end + timedelta(days=2))
+    assert after["place"]["place_old"]["confirmed_count"] == 0
+    assert after["place"]["place_new"]["confirmed_count"] == 1
+    merged = node_profiles(rows, end + timedelta(days=3))
+    assert "place_new" not in merged["place"]
+    assert merged["place"]["place_merged"]["last_confirmed_at"] == end
+    assert merged["task"]["task_work"]["confirmed_count"] == 1
+
+
+def test_node_profiles_partial_corrections_do_not_multiply_confirmations():
+    start = dt("2026-09-07T09:00:00+09:00")
+    end = start + timedelta(hours=3)
+    rows = [
+        label("place", "place_a", start, end),
+        label(
+            "place",
+            "place_b",
+            start + timedelta(hours=1),
+            start + timedelta(hours=1, minutes=30),
+            end + timedelta(minutes=1),
+        ),
+        label(
+            "place",
+            "unknown",
+            end - timedelta(hours=1),
+            end,
+            end + timedelta(minutes=2),
+        ),
+    ]
+    original = json.dumps(rows)
+    profiles = node_profiles(rows, end + timedelta(minutes=3))["place"]
+    assert profiles["place_a"]["confirmed_count"] == 1
+    assert profiles["place_a"]["last_confirmed_at"] == end - timedelta(hours=1)
+    assert profiles["place_b"]["confirmed_count"] == 1
+    assert "unknown" not in profiles
+    assert json.dumps(rows) == original
+    rows.append(label("place", "moving", start, end, end + timedelta(minutes=4)))
+    profiles = node_profiles(rows, end + timedelta(minutes=5))["place"]
+    assert all(p["confirmed_count"] == 0 for p in profiles.values())
+    assert "moving" not in profiles
+
+
+def test_node_profiles_aggregate_aliases_and_deduplicate_merged_intervals():
+    end = dt("2026-09-07T10:00:00+09:00")
+    rows = [
+        label("place", key, end - timedelta(minutes=5), end)
+        for key in ("place_a", "place_b")
+    ]
+    rows += [
+        label(
+            "place", key,
+            end + timedelta(days=day, minutes=-5),
+            end + timedelta(days=day),
+        )
+        for day, key in [(1, "place_a"), (2, "place_b")]
+    ]
+    at = end + timedelta(days=3)
+    rows.append(record(
+        "research_event", "merge", at,
+        dict(kind="context_merge", payload=dict(
+            axis="place", source_id="place_a", target_id="place_b",
+        )),
+    ))
+    profile = node_profiles(rows, at)["place"]
+    assert "place_a" not in profile
+    assert profile["place_b"] == dict(
+        confirmed_count=3,
+        confirmed_days=3,
+        last_confirmed_at=end + timedelta(days=2),
+        dominant_band="morning",
+    )
+
+
+def test_node_profiles_count_jst_days_and_require_three_confirmations():
+    end = dt("2026-09-06T23:30:00+00:00")
+    rows = []
+    for hour in range(3):
+        cutoff = end + timedelta(hours=hour)
+        report = label("place", "place_a", cutoff - timedelta(minutes=5), cutoff)
+        for field in ("start", "end"):
+            report["payload"]["payload"][field] = dt(
+                report["payload"]["payload"][field]
+            ).astimezone(timezone.utc).isoformat()
+        rows.append(report)
+    assert node_profiles(rows[:2], end + timedelta(days=1))["place"]["place_a"][
+        "dominant_band"
+    ] is None
+    profile = node_profiles(rows, end + timedelta(days=1))["place"]["place_a"]
+    assert profile["confirmed_count"] == 3
+    assert profile["confirmed_days"] == 1
+    assert profile["last_confirmed_at"] == end + timedelta(hours=2)
+    assert profile["dominant_band"] == "morning"
+
+
+@pytest.mark.parametrize(
+    "hour,band", [(8, "morning"), (13, "afternoon"), (19, "evening"), (23, "night")]
+)
+def test_node_profiles_band_uses_only_confirmations_and_sixty_percent(hour, band):
+    base = dt("2026-09-07T00:00:00+09:00")
+    rows = []
+    for day, report_hour in enumerate([hour, hour, hour, (hour + 12) % 24, (hour + 12) % 24]):
+        end = base + timedelta(days=day, hours=report_hour)
+        rows.append(label("task", "task_a", end - timedelta(minutes=5), end))
+    at = base + timedelta(days=6)
+    profile = node_profiles(rows, at)["task"]["task_a"]
+    assert profile["confirmed_count"] == 5
+    assert profile["confirmed_days"] == 5
+    assert profile["dominant_band"] == band
+    rendered = render_context_check(rows, at, "task")
+    band_name = dict(morning="午前", afternoon="午後", evening="夕方", night="夜")[band]
+    assert rendered["options"][0]["label"].endswith(f"（{band_name}の回答で多い）")
+    other = base + timedelta(days=5, hours=(hour + 12) % 24)
+    rows.append(label("task", "task_a", other - timedelta(minutes=5), other))
+    assert node_profiles(rows, at)["task"]["task_a"]["dominant_band"] is None
+
+
+@pytest.mark.parametrize("axis,noun", [("place", "拠点"), ("task", "作業")])
+def test_context_labels_use_name_then_confirmation_then_anchor(axis, noun, tmp_path):
+    at = dt("2026-09-07T15:00:00+09:00")
+    confirmed = at - timedelta(days=1)
+    anchor = at - timedelta(days=2)
+    ids = [axis + "_" + suffix for suffix in ("a12345", "b67890", "cabcde")]
+    rows = [
+        record(
+            "context_candidate",
+            key,
+            anchor,
+            dict(axis=axis, class_id=key, anchor=anchor.isoformat()),
+        )
+        for key in ids
+    ]
+    rows += [
+        label(axis, key, confirmed - timedelta(minutes=5), confirmed)
+        for key in ids[:2]
+    ]
+    rows += [
+        record(
+            "research_event",
+            "name",
+            at - timedelta(minutes=1),
+            dict(kind="context_name", payload=dict(axis=axis, class_id=ids[0], name="名前付き")),
+        ),
+        record(
+            "context_inference",
+            "current",
+            at,
+            {axis: dict(candidate_id=ids[2])},
+        ),
+    ]
+    original = json.dumps(rows)
+    rendered = render_context_check(rows, at, axis)
+    options = {o["value"]: o["label"] for o in rendered["options"]}
+    assert options[ids[0]] == "名前付き"
+    assert options[ids[1]] == f"前回9月6日の15時に確認した{noun}"
+    assert options[ids[2]] == f"9月5日の15時ごろの記録に似た{noun}候補（未確認）"
+    assert [o["value"] for o in rendered["options"][:3]] == [ids[2], ids[0], ids[1]]
+    assert "説明から判断できなければ『わからない』を選んでください。" in rendered["prompt"]
+    for option in rendered["options"]:
+        assert all(key not in option["label"] and key[-5:] not in option["label"] for key in ids)
+    assert rendered["presentation"]["candidate_id"] == ids[2]
+    assert [rendered["presentation"]["label_sources"][key] for key in ids] == [
+        "name", "last_confirmed", "anchor"
+    ]
+    with_store = Store(":memory:")
+    try:
+        snapshot = ContextEngine(with_store, dict(research_models=str(tmp_path))).snapshot(
+            "p001", at, rows
+        )
+        assert {n["id"]: n["description"] for n in snapshot["nodes"][axis]} == {
+            key: options[key] for key in ids
+        }
+    finally:
+        with_store.close()
+    assert json.dumps(rows) == original
+
+
+def test_context_labels_disambiguate_same_names_and_times_without_ids():
+    at = dt("2026-09-07T15:00:00+09:00")
+    keys = ["place_" + suffix for suffix in ("abcde", "f0123", "45678", "9abcd")]
+    nodes = {
+        key: dict(id=key, name="同じ名前", anchor=at.isoformat(), confirmed=index < 2)
+        for index, key in enumerate(keys)
+    }
+    profiles = {
+        keys[0]: dict(last_confirmed_at=at - timedelta(minutes=5)),
+        keys[1]: dict(last_confirmed_at=at - timedelta(minutes=45)),
+    }
+    descriptions = node_descriptions("place", nodes, profiles)
+    labels = [descriptions[key]["label"] for key in keys]
+    assert len(set(labels)) == len(keys)
+    assert "14時55分" in labels[0] and "14時15分" in labels[1]
+    assert all("本人確認なし" in label for label in labels[2:])
+    assert all(key[-5:] not in text for key in keys for text in labels)
+    assert descriptions == node_descriptions("place", dict(reversed(list(nodes.items()))), profiles)
+    # Equal unnamed anchors still remain unique, and literal special names are reserved.
+    for node in nodes.values():
+        node["name"] = None
+    nodes[keys[0]]["name"] = "わからない"
+    descriptions = node_descriptions("place", nodes, {})
+    labels = [d["label"] for d in descriptions.values()]
+    assert len(set(labels + ["わからない", "新しい拠点", "移動中"])) == len(keys) + 3
+
+
 def test_api_budget_answer_idempotence_and_legacy_gps(tmp_path, monkeypatch):
     monkeypatch.setattr("research.service.utc", lambda: dt("2026-09-07T15:16:00+09:00"))
     store = Store(":memory:")
@@ -213,6 +466,11 @@ def test_api_budget_answer_idempotence_and_legacy_gps(tmp_path, monkeypatch):
     engine = Engine(store, dict(research_models=str(tmp_path)))
     q = engine.pending("p001", dt("2026-09-07T15:15:00+09:00"))
     assert q["kind"] == "placeCheck"
+    presentation = question_presentation(store.rows("p001"), q["id"], dt(q["detectedAt"]))
+    assert presentation["format"] == "descriptive-v1"
+    assert presentation["question_id"] == q["id"]
+    assert presentation["ordered_option_values"] == [o["value"] for o in q["options"]]
+    assert "presentation" not in q
     app = create_app(
         dict(
             ble_enabled=False,
@@ -236,6 +494,9 @@ def test_api_budget_answer_idempotence_and_legacy_gps(tmp_path, monkeypatch):
                 question_id=q["id"],
             ),
         )
+        event["payload"]["class_id"] = "place_not_offered"
+        assert client.post("/api/research/p001/events", json=event).status_code == 422
+        event["payload"]["class_id"] = q["options"][0]["value"]
         assert client.post("/api/research/p001/events", json=event).json()["inserted"]
         assert not client.post("/api/research/p001/events", json=event).json()[
             "inserted"

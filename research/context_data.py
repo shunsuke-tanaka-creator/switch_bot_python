@@ -1,9 +1,11 @@
 """GPS-free, independently annotated place/task identities and causal observations."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import timedelta
+from heapq import heappop, heappush
 import hashlib
 from .data import dt
+from .baseline import period
 from .topology import available_rows
 
 AXES = ("place", "task")
@@ -109,6 +111,162 @@ def label_at(labels, axis, at):
             l
             for l in reversed(labels)
             if l["axis"] == axis and l["start"] < at <= l["end"]
+        ),
+        None,
+    )
+
+
+def node_profiles(rows, at):
+    """Self-confirmed intervals only, with the same precedence as label_at().
+
+    A partially corrected interval counts once, using its last surviving endpoint.
+    Fully superseded intervals (including duplicate reports) contribute no vote.
+    Dates and answer bands refer to these endpoints in JST, never model visits.
+    """
+    at = dt(at)
+    nodes, _ = catalog(rows, at)
+    labels = annotations(rows, at)
+    profiles = {
+        axis: {
+            key: dict(
+                confirmed_count=0,
+                confirmed_days=0,
+                last_confirmed_at=None,
+                dominant_band=None,
+            )
+            for key in nodes[axis]
+        }
+        for axis in AXES
+    }
+    for axis in AXES:
+        intervals = [l for l in labels if l["axis"] == axis]
+        starts = defaultdict(list)
+        bounds = set()
+        for index, interval in enumerate(intervals):
+            starts[interval["start"]].append(index)
+            bounds.update((interval["start"], interval["end"]))
+        bounds = sorted(bounds)
+        active = []
+        surviving = {}
+        # A sweep selects the latest annotation on every (start, end] segment.
+        for start, end in zip(bounds, bounds[1:]):
+            for index in starts[start]:
+                heappush(active, (-index, intervals[index]["end"]))
+            while active and active[0][1] <= start:
+                heappop(active)
+            if active:
+                surviving[-active[0][0]] = end
+        days = defaultdict(set)
+        bands = defaultdict(Counter)
+        for index, end in surviving.items():
+            key = intervals[index]["class_id"]
+            if key in ("unknown", "moving"):
+                continue
+            profile = profiles[axis][key]
+            profile["confirmed_count"] += 1
+            days[key].add(end.date())
+            bands[key][period(end)] += 1
+            last = profile["last_confirmed_at"]
+            profile["last_confirmed_at"] = max(last, end) if last else end
+        for key, profile in profiles[axis].items():
+            profile["confirmed_days"] = len(days[key])
+            count = profile["confirmed_count"]
+            if count >= 3:
+                band, votes = bands[key].most_common(1)[0]
+                if votes * 5 >= count * 3:
+                    profile["dominant_band"] = band
+    return profiles
+
+
+def node_descriptions(axis, nodes, profiles):
+    """Shared question/Web labels; identities are used only for deterministic ordering."""
+    noun = "拠点" if axis == "place" else "作業"
+    band_names = dict(morning="午前", afternoon="午後", evening="夕方", night="夜")
+    descriptions = {}
+
+    def hour_text(at):
+        at = dt(at)
+        return f"{at.month}月{at.day}日の{at.hour}時"
+
+    def precise_text(at):
+        at = dt(at)
+        return f"{at.year}年{at.month}月{at.day}日{at.hour}時{at.minute}分"
+
+    for key, node in nodes.items():
+        profile = profiles.get(key, {})
+        last = profile.get("last_confirmed_at")
+        if node.get("name"):
+            label, source = node["name"], "name"
+        elif last:
+            label, source = f"前回{hour_text(last)}に確認した{noun}", "last_confirmed"
+            if profile.get("dominant_band"):
+                label += f"（{band_names[profile['dominant_band']]}の回答で多い）"
+        else:
+            anchor = node.get("anchor")
+            label = (
+                f"{hour_text(anchor)}ごろの記録に似た{noun}候補（未確認）"
+                if anchor
+                else f"未確認の{noun}候補"
+            )
+            source = "anchor"
+        descriptions[key] = dict(label=label, source=source)
+
+    # Reserve the existing special option names as well as the ordinary labels.
+    reserved = {"わからない", "新しい拠点" if axis == "place" else "新しいタスク"}
+    if axis == "place":
+        reserved.add("移動中")
+    counts = Counter(d["label"] for d in descriptions.values())
+    for key, description in descriptions.items():
+        if counts[description["label"]] < 2 and description["label"] not in reserved:
+            continue
+        last = profiles.get(key, {}).get("last_confirmed_at")
+        anchor = nodes[key].get("anchor")
+        detail = (
+            "最終確認：" + precise_text(last)
+            if last
+            else "本人確認なし・出典：" + precise_text(anchor)
+            if anchor
+            else "本人確認なし"
+        )
+        description["label"] += f"（{detail}）"
+
+    groups = defaultdict(list)
+    for key, description in descriptions.items():
+        groups[description["label"]].append(key)
+    used = set(groups) | reserved
+
+    def recency(key):
+        last = profiles.get(key, {}).get("last_confirmed_at")
+        anchor = nodes[key].get("anchor")
+        return (
+            last is None,
+            -dt(last).timestamp() if last else 0,
+            -dt(anchor).timestamp() if anchor else 0,
+            key,
+        )
+
+    for label, keys in sorted(groups.items()):
+        if len(keys) < 2 and label not in reserved:
+            continue
+        number = 1
+        for key in sorted(keys, key=recency):
+            unique = f"{label}（同じ説明の候補{number}）"
+            while unique in used:
+                number += 1
+                unique = f"{label}（同じ説明の候補{number}）"
+            descriptions[key]["label"] = unique
+            used.add(unique)
+            number += 1
+    return descriptions
+
+
+def question_presentation(rows, question_id, at):
+    """Look up server-owned presentation metadata without changing annotation adoption."""
+    return next(
+        (
+            r["payload"]
+            for r in reversed(available_rows(rows, dt(at)))
+            if r["kind"] == "question_presentation" and r["id"] == question_id
         ),
         None,
     )

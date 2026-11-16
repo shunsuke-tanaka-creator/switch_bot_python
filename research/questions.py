@@ -6,6 +6,62 @@ from .data import dt
 from .insights import recommend
 
 
+def render_context_check(rows, at, axis):
+    """Render neutral context choices and separate server-side presentation metadata."""
+    from .context_data import (
+        catalog,
+        ident,
+        node_descriptions,
+        node_profiles,
+        resolve,
+        summary,
+    )
+
+    at = dt(at)
+    nodes, aliases = catalog(rows, at)
+    current = summary(rows, at)["current"].get(axis) or {}
+    candidate = current.get("candidate_id") or current.get("id")
+    candidate = resolve(aliases[axis], candidate)
+    ordered = sorted(
+        nodes[axis].values(),
+        key=lambda n: (n["id"] != candidate, not n["confirmed"], n["id"]),
+    )[:4]
+    descriptions = node_descriptions(axis, nodes[axis], node_profiles(rows, at)[axis])
+    options = [
+        dict(label=descriptions[n["id"]]["label"], value=n["id"]) for n in ordered
+    ]
+    label_sources = {n["id"]: descriptions[n["id"]]["source"] for n in ordered}
+    noun = "拠点" if axis == "place" else "タスク"
+    special = [
+        dict(label="新しい" + noun, value=ident(axis, at.isoformat())),
+        dict(label="わからない", value="unknown"),
+    ]
+    if axis == "place":
+        special.append(dict(label="移動中", value="moving"))
+    options.extend(special)
+    # Special options have fixed literal names, independent of node evidence.
+    for option in special:
+        label_sources.setdefault(option["value"], "name")
+    prompt = (
+        "今いる拠点はどれですか？ 作業が変わっただけなら同じ拠点です。"
+        if axis == "place"
+        else "今のタスクはどれですか？ 拠点が変わっても同じ作業なら同じタスクです。"
+    )
+    prompt += " 説明から判断できなければ『わからない』を選んでください。"
+    return dict(
+        kind="placeCheck" if axis == "place" else "taskCheck",
+        prompt=prompt,
+        options=options,
+        presentation=dict(
+            format="descriptive-v1",
+            axis=axis,
+            candidate_id=candidate,
+            ordered_option_values=[option["value"] for option in options],
+            label_sources=label_sources,
+        ),
+    )
+
+
 def settings(rows):
     value = dict(
         questions_enabled=True,
@@ -271,6 +327,7 @@ class QuestionQueue:
             )
             kind = prompt = event = None
             pmtt = None
+            presentation = None
             options = []
             ttl = 60
 
@@ -459,23 +516,18 @@ class QuestionQueue:
                 kind = None
             # One shared budget/gap for all surfaces. Alternate axes across days.
             if kind is None and at.hour < 22:
-                from .context_data import catalog, fresh, summary, ident
+                from .context_data import fresh
                 if fresh(rows,at):
-                    nodes,_=catalog(rows,at)
                     context_history=[r for r in issued if r["payload"]["kind"] in ("placeCheck","taskCheck")]
                     axis="task" if context_history and context_history[0]["payload"]["kind"]=="placeCheck" else "place"
                     previous=[r for r in context_history if dt(r["at"]).date()==at.date()]
                     if len(previous)<1:
-                        kind="placeCheck" if axis=="place" else "taskCheck"
-                        prompt="今いる拠点はどれですか？ 作業が変わっただけなら同じ拠点です。" if axis=="place" else "今のタスクはどれですか？ 拠点が変わっても同じ作業なら同じタスクです。"
+                        rendered = render_context_check(rows, at, axis)
+                        kind = rendered["kind"]
+                        prompt = rendered["prompt"]
+                        options = rendered["options"]
+                        presentation = rendered["presentation"]
                         event="context:"+axis
-                        noun="拠点" if axis=="place" else "タスク"
-                        current=summary(rows,at)['current'].get(axis) or {}
-                        candidate=current.get('candidate_id') or current.get('id')
-                        ordered=sorted(nodes[axis].values(),key=lambda n:(n['id']!=candidate,not n['confirmed'],n['id']))
-                        options=opts([(n['name'] or noun+' '+n['id'][-5:],n['id']) for n in ordered[:4]])
-                        options+=opts([('新しい'+noun,ident(axis,at.isoformat())),('わからない','unknown')])
-                        if axis=='place':options+=opts([('移動中','moving')])
                         ttl=30
             if kind is None:
                 # Routine reports are kept alongside event-triggered reports to reduce selection bias.
@@ -566,6 +618,14 @@ class QuestionQueue:
                 q["pmtt"] = pmtt
             if persist:
                 self.store.save("question_issued", q["id"], p, at, q)
+                if presentation is not None:
+                    self.store.save(
+                        "question_presentation",
+                        q["id"],
+                        p,
+                        at,
+                        dict(presentation, question_id=q["id"]),
+                    )
             return result(q)
 
     def pending(self, p, at):
