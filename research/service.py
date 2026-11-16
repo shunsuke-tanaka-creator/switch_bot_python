@@ -150,6 +150,12 @@ class Engine:
         return infer_state(self,p,at,data_mode_)
 
     def train(self,p,data_mode_='real',force=False):
+        result=self._train(p,data_mode_,force)
+        from .delivery import evaluate_delivery
+        evaluate_delivery(self,p,data_mode_)
+        return result
+
+    def _train(self,p,data_mode_='real',force=False):
         data_mode_=data_mode(data_mode_)
         from .train import train
         if self.config.get('research_require_cuda'):
@@ -351,6 +357,13 @@ def install(app,store,config):
             prediction=latest if not stale else dict(status='worker_not_running_or_stale',current=None,daily=None,data_mode='real',contains_sample=False)
         else:
             prediction=await asyncio.to_thread(engine.infer,p,None,data_mode_)
+        # Older worker records contain only LSTM estimates; add provenance for
+        # readers without rewriting persisted history.
+        for scope in ('current','daily'):
+            for item in (prediction.get(scope) or {}).values():
+                item.setdefault('source','lstm')
+                item.setdefault('provisional',False)
+                item.setdefault('baseline_method',None)
         answers=[dict(at=r['at'],kind=r['payload'].get('question',{}).get('kind'),answer=r['payload'].get('answer')) for r in records if r['kind']=='narrative']
         return dict(prediction=prediction,model=engine.status(p,data_mode_),answers=answers[:500],activity_catalog=ACTIVITIES,
                     corrections=[r['payload'] for r in records if r['kind']=='correction'][:100],

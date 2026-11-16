@@ -1,7 +1,24 @@
 """Participant-macro state metrics and chronological reference predictors."""
 from collections import defaultdict
 import numpy as np
-from .data import SCALES, materialize
+from .data import SCALES, dt, materialize
+
+
+def sequential_baselines(labels, at, scope):
+    """Received-cutoff personal mean and last answer, without cold-start imputation.
+
+    Unlike the experiment's frozen training mean, the delivery mean updates with
+    each received answer. Last-value ordering matches ReferencePredictors.
+    """
+    at = dt(at)
+    prior = sorted((l for l in labels if l.scope == scope and l.at < at and l.available < at),
+                   key=lambda l: (l.at, l.available, l.id))
+    result = {}
+    for i, name in enumerate(SCALES):
+        values = [float(l.values[i]) for l in prior if np.isfinite(l.values[i])]
+        result[name] = dict(n=len(values), mean=float(np.mean(values)) if values else None,
+                            last=values[-1] if values else None)
+    return result
 
 
 def state_metrics(records):
