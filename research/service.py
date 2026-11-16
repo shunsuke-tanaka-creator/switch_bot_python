@@ -195,20 +195,30 @@ class Engine:
         prediction=None if data_mode_=='real' else self.infer(p,at,data_mode_)
         insight=self.insights.snapshot(p,at,prediction,records,data_mode_)
         selected=self.questions.preview(p,at,records,insight,self.rows(p,'real'))
+        # 追加: 既存preview契約を維持し、歩数検出器の段階・閾値・抑止理由を確認可能にする。
         return dict(preview=True,participant=p,data_mode=data_mode_,
                     contains_sample=data_mode_!='real' or p==self.sample_participant,
-                    at=iso(at),question=selected['question'],gates=selected['gates'])
+                    at=iso(at),question=selected['question'],gates=selected['gates'],
+                    exercise=insight.get('exercise'))
 
     def pmtt(self,p,data_mode_='real'):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
         rows=self.rows(p,data_mode_);nodes={};edges=[]
         for r in rows:
-            if r['kind'] not in {'session','narrative','switchbot','correction','inference'}:continue
+            if r['kind'] not in {'session','narrative','switchbot','correction','inference','step_snapshot','state_step_snapshot'}:continue
             at=dt(r['at']);week='week:'+monday(at).date().isoformat();day='day:'+at.date().isoformat();work='work:'+at.replace(minute=0,second=0,microsecond=0).isoformat()
             for key,kind in [(week,'Pattern'),(day,'Day'),(work,'StateEpisode')]:nodes[key]=dict(id=key,kind=kind)
             key=r['kind']+':'+r['id'];nodes[key]=dict(id=key,kind='Observation',source=r['kind'],at=r['at'])
             edges.extend([dict(source=key,target=work,kind='provenance'),dict(source=work,target=day,kind='part_of'),dict(source=day,target=week,kind='part_of')])
             if r['kind']=='correction':nodes[key]['interval']=[r['payload']['start'],r['payload']['end']]
+        # 追加: 運動提案の状態・通常歩数・不足・METs候補をPMTTへ残す。
+        for r in rows:
+            if r['kind']!='question_issued' or r['payload'].get('kind')!='exerciseProposal':continue
+            key='proposal:'+r['id'];evidence=r['payload']['pmtt']
+            nodes[key]=dict(id=key,kind='ExerciseProposal',at=r['at'],evidence=evidence)
+            source='state_step_snapshot:'+evidence['evidence_id']
+            if source not in nodes:source='session:'+evidence['evidence_id']
+            if source in nodes:edges.append(dict(source=source,target=key,kind='supports'))
         from .context_data import catalog
         classes,aliases=catalog(rows,dt(utc()))
         from .context_data import resolve
@@ -425,6 +435,9 @@ def install(app,store,config):
                                 now=utc()
                                 result=await asyncio.to_thread(engine.context.infer,p,now)
                                 store.save('context_inference',str(uuid4()),p,now,result)
+                                # 追加: Context推定後に直近歩数をGrowingMap状態へ結合して蓄積する。
+                                from .insights import persist_state_step_snapshots
+                                persist_state_step_snapshots(store,p,now)
                                 day=(dt(now)-timedelta(days=1)).date().isoformat()
                                 if reviewed.get(p)!=day:
                                     if not any(r['kind']=='context_review' and r['payload']['day']==day for r in engine.rows(p)):

@@ -216,7 +216,14 @@ def create_app(config=None, store=None):
     @app.post("/api/sessions")
     def sessions(payload: Session):
         p = payload.model_dump(mode="json"); p["received_at"] = stamp(now())
-        return dict(inserted=store.save("session", payload.session_id, payload.participant_id, payload.ended_at, p))
+        inserted = store.save("session", payload.session_id, payload.participant_id, payload.ended_at, p)
+        # 追加: モデル特徴を変えず、歩数と利用可能なトポロジカル状態を蓄積する。
+        from research.insights import persist_state_step_snapshots, persist_step_snapshot
+        persist_step_snapshot(
+            store, payload.participant_id, payload.session_id, p
+        )
+        persist_state_step_snapshots(store, payload.participant_id, now())
+        return dict(inserted=inserted)
 
     @app.post("/api/narrative-events")
     def narratives(payload: Narrative | list[Narrative]):
