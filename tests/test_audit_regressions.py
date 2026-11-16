@@ -13,7 +13,8 @@ from research.evaluation import online_updates
 from research.sample_data import generate_sample
 from research.text import encoder_identity
 from research.provenance import experiment_id
-from research.questions import QuestionQueue
+from research.questions import QuestionQueue, render_context_check
+from research.context_data import ident, question_presentation
 from research.data_modes import source_identity
 from research.io import atomic_json
 
@@ -103,6 +104,92 @@ class AuditRegressionTests(unittest.TestCase):
             self.assertIn('currentState',kinds);self.assertIn('nightReflection',kinds);self.assertIn('weatherMood',kinds)
             first.append(kinds[0])
         self.assertEqual(first,['placeCheck','taskCheck']);store.close()
+
+    def test_context_presentation_is_saved_once_and_pending_preview_keep_choices(self):
+        class Insights:
+            def snapshot(self, *args):
+                return dict(fatigue={}, typing={}, places={})
+
+        at = dt("2026-11-01T10:00:00+09:00")
+        store = Store(":memory:")
+        self.addCleanup(store.close)
+        queue = QuestionQueue(store, Insights())
+        key = "place_abcdef12345"
+        store.save(
+            "context_candidate", key, "p001", at - timedelta(days=1),
+            dict(axis="place", class_id=key, anchor=(at - timedelta(days=1)).isoformat()),
+        )
+        store.save("session", "s", "p001", at, dict(events=[]))
+        rows = store.rows("p001")
+        preview = queue.preview("p001", at, rows, Insights().snapshot(), rows)["question"]
+        self.assertEqual(len(store.rows("p001")), len(rows))
+        self.assertIsNone(question_presentation(rows, preview["id"], at))
+        issued = queue.pending("p001", at)
+        self.assertEqual(issued["kind"], "placeCheck")
+        self.assertEqual(issued["prompt"], preview["prompt"])
+        self.assertEqual(issued["options"], preview["options"])
+        self.assertEqual(dt(issued["expiresAt"]) - at, timedelta(minutes=30))
+        metadata = question_presentation(store.rows("p001"), issued["id"], at)
+        self.assertEqual(metadata["format"], "descriptive-v1")
+        self.assertEqual(metadata["axis"], "place")
+        self.assertEqual(metadata["question_id"], issued["id"])
+        self.assertIsNone(metadata["candidate_id"])
+        self.assertEqual(metadata["ordered_option_values"], [o["value"] for o in issued["options"]])
+        self.assertEqual(metadata["label_sources"][key], "anchor")
+        self.assertEqual(set(metadata["label_sources"]), set(metadata["ordered_option_values"]))
+        self.assertIsNone(question_presentation(store.rows("p001"), issued["id"], at - timedelta(seconds=1)))
+        self.assertIsNone(question_presentation(store.rows("p001"), "missing", at))
+        self.assertNotIn("presentation", issued)
+        self.assertEqual(issued["options"][-3:], [
+            dict(label="新しい拠点", value=ident("place", at.isoformat())),
+            dict(label="わからない", value="unknown"),
+            dict(label="移動中", value="moving"),
+        ])
+        later = at + timedelta(minutes=1)
+        store.save(
+            "research_event", "rename", "p001", later,
+            dict(kind="context_name", payload=dict(axis="place", class_id=key, name="新しい表示名")),
+        )
+        store.save("context_inference", "new-estimate", "p001", later, dict(place=dict(candidate_id=key)))
+        self.assertEqual(queue.pending("p001", later), issued)
+        rows = store.rows("p001")
+        self.assertEqual(queue.preview("p001", later, [], Insights().snapshot(), rows)["question"], issued)
+        self.assertEqual(store.rows("p001"), rows)
+        self.assertEqual(question_presentation(rows, issued["id"], later), metadata)
+        self.assertEqual(len([r for r in rows if r["kind"] == "question_presentation"]), 1)
+
+    def test_context_order_limit_and_task_special_values_are_unchanged(self):
+        at = dt("2026-11-01T10:00:00+09:00")
+        keys = ["task_" + suffix for suffix in ("aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee", "zzzzz")]
+        rows = [
+            row(
+                "context_candidate", key, at - timedelta(days=1),
+                dict(axis="task", class_id=key, anchor=(at - timedelta(days=1)).isoformat()),
+            )
+            for key in keys
+        ]
+        for key in keys[1:3]:
+            rows.append(row(
+                "research_event", "confirm:" + key, at - timedelta(minutes=1),
+                dict(kind="context_label", payload=dict(
+                    axis="task", class_id=key,
+                    start=(at - timedelta(minutes=10)).isoformat(),
+                    end=(at - timedelta(minutes=5)).isoformat(),
+                )),
+            ))
+        rows.append(row("context_inference", "latest", at, dict(task=dict(candidate_id=keys[-1]))))
+        rendered = render_context_check(rows, at, "task")
+        options = rendered["options"]
+        self.assertEqual([o["value"] for o in options[:4]], [keys[-1], keys[1], keys[2], keys[0]])
+        self.assertEqual(options[4:], [
+            dict(label="新しいタスク", value=ident("task", at.isoformat())),
+            dict(label="わからない", value="unknown"),
+        ])
+        self.assertEqual(len(set(o["label"] for o in options)), len(options))
+        for option in options:
+            self.assertTrue(all(key[-5:] not in option["label"] for key in keys))
+        self.assertEqual(rendered["presentation"]["candidate_id"], keys[-1])
+        self.assertEqual(rendered["presentation"]["ordered_option_values"], [o["value"] for o in options])
 
     def test_commit_contract_reconstructs_candidate_without_duplicating_prefix(self):
         t=dt('2026-11-01T10:00:00+09:00')

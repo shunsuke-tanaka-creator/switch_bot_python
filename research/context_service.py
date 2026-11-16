@@ -11,6 +11,8 @@ from .context_data import (
     observations,
     annotations,
     label_at,
+    node_profiles,
+    node_descriptions,
     catalog,
     resolve,
     fresh,
@@ -203,8 +205,21 @@ class ContextEngine:
         return result
 
     def snapshot(self, p, at, rows=None):
+        at = dt(at)
         rows = self.store.rows(p) if rows is None else rows
-        result = summary(rows, dt(at))
+        result = summary(rows, at)
+        profiles = node_profiles(rows, at)
+        for axis in AXES:
+            nodes = {n["id"]: n for n in result["nodes"][axis]}
+            descriptions = node_descriptions(axis, nodes, profiles[axis])
+            result["nodes"][axis] = [
+                dict(
+                    node,
+                    description=descriptions[key]["label"],
+                    label_source=descriptions[key]["source"],
+                )
+                for key, node in nodes.items()
+            ]
         result["reviews"] = [
             r["payload"] for r in rows if r["kind"] == "context_review"
         ][:7]
