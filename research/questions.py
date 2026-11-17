@@ -62,6 +62,28 @@ def render_context_check(rows, at, axis):
     )
 
 
+def context_session_fresh(rows, at):
+    """Presence window for context-question *selection* only.
+
+    The shared context_data.fresh (1h from session end) still governs model
+    inference and training. For selection it misaligns with this queue: while
+    a routine question is unexpired, already_pending returns it instead, and
+    by the time it expires the last session is usually more than 1h old, so
+    the context check was effectively never selectable in real mode. A
+    same-day session that ended within 3h is enough evidence that asking now
+    is worthwhile; the answer still labels the 5 minutes before detectedAt,
+    the question still expires in 30 minutes, and rows are pre-filtered to
+    received_at <= at by the caller.
+    """
+    at = dt(at)
+    return any(
+        r["kind"] == "session"
+        and dt(r["at"]).date() == at.date()
+        and timedelta(0) <= at - dt(r["at"]) <= timedelta(hours=3)
+        for r in rows
+    )
+
+
 def settings(rows):
     value = dict(
         questions_enabled=True,
@@ -517,8 +539,7 @@ class QuestionQueue:
                 kind = None
             # One shared budget/gap for all surfaces. Alternate axes across days.
             if kind is None and at.hour < 22:
-                from .context_data import fresh
-                if fresh(rows,at):
+                if context_session_fresh(rows, at):
                     context_history=[r for r in issued if r["payload"]["kind"] in ("placeCheck","taskCheck")]
                     axis="task" if context_history and context_history[0]["payload"]["kind"]=="placeCheck" else "place"
                     previous=[r for r in context_history if dt(r["at"]).date()==at.date()]
