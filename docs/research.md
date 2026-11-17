@@ -40,7 +40,7 @@ python3 -m venv .venv
 
 CUDA動作を実際に確認する。`deploy/ubuntu.example.json` を `server-config.json` へコピーし、IP/保存先を実環境へ置換する。`research_require_cuda: true` はGPUが利用できなければ学習を停止し、エラーを記録する。
 
-文章の意味を利用する場合は、例えば `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` の信頼できるモデルを事前にダウンロードし、ローカル保存先を `text_model` に指定する。参加者の文章は外部へ送信しない。実行時は `local_files_only=True / trust_remote_code=False`。重みと設定のSHA256をcheckpointに記録し、推論時のモデル不一致は停止する。モデルファイルをGitへ入れない。
+文章モデルは `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` を採用する。固定revisionの配置、学習CLI、サーバー設定、再学習と文字n-gram比較は [文章エンコーダの導入](sentence-encoder.md) を参照。基本・文脈・SSL・部分プーリングへ同じモデルを渡す。実データでの精度改善は未評価。
 
 手動起動例：
 

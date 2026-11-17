@@ -153,3 +153,7 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 pyth
 期待：既存テストと `tests/test_experiments.py` がすべて `passed`。
 意図しない出力：`FAILED` / `ERROR` / 依存不足による `skipped`。その状態ではmainへマージしません。
 テストは架空のサンプル、メモリDB、一時ディレクトリのみを使用します。
+
+## 文章エンコーダ
+
+実験CLIもSentenceTransformerを既定とする。[配置手順](sentence-encoder.md)を先に実施する。`--text-model` は教師学習とSSLの両方へ渡され、`experiment.json` とcheckpointにモデル識別情報を保存する。文章モデルなしで合成データの旧経路を試す場合は `--character-ngram` を明示する。

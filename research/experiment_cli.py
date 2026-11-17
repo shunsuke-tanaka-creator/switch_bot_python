@@ -6,6 +6,8 @@ from .experiment_config import ExperimentConfig
 
 def add_parser(sub):
     p = sub.add_parser('experiment', help='Offline opt-in evaluation, SSL and partial pooling')
+    from .text_config import add_text_arguments
+    add_text_arguments(p)
     p.add_argument('--models', default='data/experiments')
     p.add_argument('--participants', nargs='+', help='Explicit cohort IDs; never auto-enumerates the database')
     p.add_argument('--sample-fixture', action='store_true', help='Use repository artificial cohort; never opens a DB')

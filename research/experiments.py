@@ -158,7 +158,9 @@ def run_experiment(rows, directory, config=None):
 def _run(rows, directory, config):
     random.seed(config.seed); np.random.seed(config.seed); torch.manual_seed(config.seed)
     torch.set_num_threads(min(4, os.cpu_count() or 1))
-    timelines, examples = cohort(rows)
+    timelines, examples = cohort(rows, text_model=config.text_model)
+    from .text import text_metadata
+    text_info = text_metadata(next(iter(timelines.values())).encoder) if timelines else text_metadata(None)
     if len(timelines) > 1 and not config.enabled_partial_pooling:
         raise ValueError('Multiple participants require enabled_partial_pooling')
     train, valid, test, boundaries = chronological_split(examples, config.train_before, config.test_from, config.pretrain_before)
@@ -190,6 +192,7 @@ def _run(rows, directory, config):
                               stride_minutes=config.ssl_stride_minutes, max_samples=config.ssl_max_samples)
     stages = fit_supervised(model, train, valid, mean, std, config)
     report = dict(status='trained', experiment_version=1, production_promoted=False, config=asdict(config),
+                  text_encoder=text_info, text_identity=text_info['identity'], text_model=config.text_model,
                   boundaries=boundaries, counts=dict(train=len(train), validation=len(valid), test=len(test)),
                   participants=list(model.participants), ssl=ssl_report, stages=stages,
                   primary_metric='MAE_macro', validation=evaluate(model, valid, mean, std),

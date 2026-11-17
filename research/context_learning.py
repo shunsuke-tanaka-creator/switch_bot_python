@@ -24,6 +24,7 @@ from .context_data import (
     ident,
     catalog,
 )
+from .text import text_metadata
 from .context_model import ContextLSTM, relation_loss
 
 
@@ -192,6 +193,7 @@ def train_context(
             fingerprint=fp,
             experiment_id=run_id,
             text_model=text_model,
+            text_encoder=text_metadata(timeline.encoder),
             windows=len(times),
             days=len(dates),
             trained_through=at.isoformat(),

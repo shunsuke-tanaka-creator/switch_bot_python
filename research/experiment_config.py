@@ -27,6 +27,7 @@ class ExperimentConfig:
     train_before: str | None = None
     test_from: str | None = None
     pretrain_before: str | None = None
+    text_model: str | None = None  # CLI defaults to the prepared sentence model.
 
     def validate(self):
         if not any((self.enabled_evaluation, self.enabled_ssl, self.enabled_partial_pooling, self.enabled_prequential)):

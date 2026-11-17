@@ -78,14 +78,17 @@ def main():
     ex=sub.add_parser('export');ex.add_argument('path')
     im=sub.add_parser('import');im.add_argument('path')
     sy=sub.add_parser('sync');sy.add_argument('--source',required=True);sy.add_argument('--state',default='data/replication.json');sy.add_argument('--watch',action='store_true')
+    from .text_config import add_text_arguments
     for name in ('train','compare','personalize'):
-        tr=sub.add_parser(name);tr.add_argument('--models',default='data/models');tr.add_argument('--epochs',type=int,default=20);tr.add_argument('--text-model',default=None)
+        tr=sub.add_parser(name);tr.add_argument('--models',default='data/models');tr.add_argument('--epochs',type=int,default=20)
+        add_text_arguments(tr)
         tr.add_argument('--data-mode',choices=DATA_MODES,default='real');tr.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
         tr.add_argument('--sample-manifest',default=None)
     for name in ('export-bundle','import-bundle'):
         command=sub.add_parser(name);command.add_argument('path');command.add_argument('--models',default='data/models')
     context=sub.add_parser('context-train');context.add_argument('--models',default='data/models');context.add_argument('--epochs',type=int,default=12)
-    context.add_argument('--text-model');context.add_argument('--device',choices=['auto','cpu','cuda','mps'],default='auto');context.add_argument('--evaluate-test',action='store_true');context.add_argument('--force',action='store_true')
+    add_text_arguments(context)
+    context.add_argument('--device',choices=['auto','cpu','cuda','mps'],default='auto');context.add_argument('--evaluate-test',action='store_true');context.add_argument('--force',action='store_true')
     sample=sub.add_parser('generate-sample');sample.add_argument('--calendar',required=True);sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
     sample.add_argument('--manifest',default=None);sample.add_argument('--dry-run',action='store_true');sample.add_argument('--include-today',action='store_true')
     args=p.parse_args();identifier(args.participant)
