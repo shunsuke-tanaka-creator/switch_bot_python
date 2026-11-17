@@ -38,17 +38,22 @@ class DiscoveryRuntime:
             return None
         stat = path.stat()
         key = (str(path), stat.st_mtime_ns, stat.st_size)
-        if key not in self.cache:
-            import torch
-            from .discovery_model import DiscoveryModel
-            state = torch.load(path, map_location="cpu", weights_only=True)
-            if state.get("version")!=VERSION or state.get("features")!=FEATURES:
-                return None
-            model = DiscoveryModel(**state["settings"])
-            model.load_state_dict(state["weights"]); model.eval()
-            maps = {a:DiscoveryMap.from_dict(s) for a,s in state["maps"].items()}
-            self.cache = {key:(state,model,maps)}
-        return self.cache[key]
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        import torch
+        from .discovery_model import DiscoveryModel
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if state.get("version")!=VERSION or state.get("features")!=FEATURES:
+            return None
+        model = DiscoveryModel(**state["settings"])
+        model.load_state_dict(state["weights"]); model.eval()
+        maps = {a:DiscoveryMap.from_dict(s) for a,s in state["maps"].items()}
+        loaded = (state,model,maps)
+        # Return the local snapshot: concurrent training/another participant can
+        # replace or clear the bounded cache after this assignment.
+        self.cache = {key:loaded}
+        return loaded
 
     def train(self, participant, mode="real", force=False):
         from .discovery_learning import train_discovery
@@ -66,7 +71,6 @@ class DiscoveryRuntime:
         self.cache.clear()
         loaded = self.load(participant,mode)
         if mode=="real" and loaded:
-            # ID/name/outbox compatibility; task is an alias, not a second model.
             for axis,mapping in loaded[2].items():
                 wire = "task" if axis=="behavior" else "place"
                 for node in mapping.nodes.values():
@@ -214,8 +218,10 @@ class DiscoveryInsights:
         rows=self.runtime.engine.rows(p,data_mode) if rows is None else rows
         source=available_rows(rows,at)
         key=(p,data_mode,at.date().isoformat())
-        if key not in self.trend_cache:
-            self.trend_cache={key:weekday_trends(rows,at)}
+        trends=self.trend_cache.get(key)
+        if trends is None:
+            trends=weekday_trends(rows,at)
+            self.trend_cache={key:trends}
         patterns=dict(nodes=[],edges=[],current=None,latest=None,aliases={},
                       status="untrained",version=VERSION,at_capacity=False)
         loaded=self.runtime.load(p,data_mode)
@@ -227,7 +233,7 @@ class DiscoveryInsights:
                 edges=mapping["edges"],status="training_map",at_capacity=mapping["overflow"]>0,
                 model_id=loaded[0]["report"]["experiment_id"])
         return dict(version=VERSION,architecture="discovery",at=at.isoformat(),patterns=patterns,
-                    baseline=conditional(rows,at),trends=self.trend_cache[key],
+                    baseline=conditional(rows,at),trends=trends,
                     typing=typing_change(typing_windows(rows,at),at),
                     places=dict(nodes=[],edges=[],current=None,latest=None,
                                 destination=dict(status="gps_disabled",places=[]),anomaly=None,time_anomaly=None),
