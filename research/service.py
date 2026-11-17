@@ -119,8 +119,18 @@ class Engine:
         self.root=Path(config.get('research_models','data/models'));self.root.mkdir(parents=True,exist_ok=True)
         self.sample_participant=config.get('research_sample_participant',DEFAULT_SAMPLE_PARTICIPANT)
         self.sample_manifest=Path(config.get('research_sample_manifest',f'data/sample/{self.sample_participant}/manifest.json'))
-        self.context=ContextEngine(store,config)
-        self.insights=InsightEngine(store,config)
+        self.architecture=config.get('research_architecture','legacy')
+        if self.architecture not in ('legacy','discovery'):
+            raise ValueError('research_architecture must be legacy or discovery')
+        self.discovery=None
+        if self.architecture=='discovery':
+            from .discovery_service import DiscoveryRuntime, DiscoveryContext, DiscoveryInsights
+            self.discovery=DiscoveryRuntime(self)
+            self.context=DiscoveryContext(self.discovery)
+            self.insights=DiscoveryInsights(self.discovery)
+        else:
+            self.context=ContextEngine(store,config)
+            self.insights=InsightEngine(store,config)
         self.questions=QuestionQueue(store,self.insights)
 
     def rows(self,p,data_mode_='real'):
@@ -137,6 +147,8 @@ class Engine:
 
     def status(self,p,data_mode_='real'):
         data_mode_=data_mode(data_mode_)
+        if self.discovery is not None:
+            return self.discovery.status(p,data_mode_)
         path=self.read_path(p,data_mode_,'status.json')
         result=json.loads(path.read_text()) if path.exists() else dict(status='untrained')
         result.setdefault('data_mode',data_mode_)
@@ -146,10 +158,14 @@ class Engine:
         return result
 
     def infer(self,p,at=None,data_mode_='real'):
+        if self.discovery is not None:
+            return self.discovery.infer(identifier(p),at,data_mode(data_mode_))
         from .inference import infer_state
         return infer_state(self,p,at,data_mode_)
 
     def train(self,p,data_mode_='real',force=False):
+        if self.discovery is not None:
+            return self.discovery.train(identifier(p),data_mode(data_mode_),force)
         result=self._train(p,data_mode_,force)
         from .delivery import evaluate_delivery
         evaluate_delivery(self,p,data_mode_)
@@ -233,7 +249,7 @@ class Engine:
                 nodes[item['id']]=dict(id=item['id'],kind='ContextPlace' if axis=='place' else 'ContextTask',name=item['name'],confirmed=item['confirmed'])
         for r in rows:
             if r['kind']!='context_inference':continue
-            key='context:'+r['id'];nodes[key]=dict(id=key,kind='ContextEpisode',at=r['at'],source='live_inference')
+            key='context:'+r['id'];nodes[key]=dict(id=key,kind='ContextEpisode',at=r['at'],source='live_inference',architecture=r['payload'].get('architecture','legacy'))
             for axis in ('place','task'):
                 value=r['payload'].get(axis) or {};target=value.get('id')
                 if target:
@@ -352,7 +368,8 @@ def install(app,store,config):
         # Inference is persisted by the worker, not by every dashboard poll.
         records=engine.rows(p,data_mode_)
         if data_mode_=='real':
-            latest=next((r['payload'] for r in records if r['kind']=='inference' and r['payload'].get('data_mode','real')=='real'),None)
+            latest=next((r['payload'] for r in records if r['kind']=='inference' and r['payload'].get('data_mode','real')=='real'
+                         and r['payload'].get('architecture','legacy')==engine.architecture),None)
             stale=latest is None or (dt(utc())-dt(latest['at'])).total_seconds()>180
             prediction=latest if not stale else dict(status='worker_not_running_or_stale',current=None,daily=None,data_mode='real',contains_sample=False)
         else:
@@ -366,6 +383,7 @@ def install(app,store,config):
                 item.setdefault('baseline_method',None)
         answers=[dict(at=r['at'],kind=r['payload'].get('question',{}).get('kind'),answer=r['payload'].get('answer')) for r in records if r['kind']=='narrative']
         return dict(prediction=prediction,model=engine.status(p,data_mode_),answers=answers[:500],activity_catalog=ACTIVITIES,
+                    architecture=engine.architecture,activity_role='posthoc_only' if engine.discovery is not None else 'auxiliary',
                     corrections=[r['payload'] for r in records if r['kind']=='correction'][:100],
                     data_mode=data_mode_,contains_sample=data_mode_!='real' or p==engine.sample_participant)
 
@@ -431,7 +449,8 @@ def install(app,store,config):
                             from .io import atomic_json
                             for p in participants(store,engine.sample_participant):
                                 for data_mode_ in config.get('research_training_modes',['real']):
-                                    atomic_json(engine.directory(p,data_mode_)/'error.json',dict(at=iso(utc()),error=str(exc)))
+                                    directory=engine.discovery.directory(p,data_mode_) if engine.discovery is not None else engine.directory(p,data_mode_)
+                                    atomic_json(directory/'error.json',dict(at=iso(utc()),error=str(exc)))
                             logging.exception('Research training failed; previous checkpoint preserved')
                         await asyncio.sleep(3600)
                 async def context_training_loop():
@@ -448,17 +467,21 @@ def install(app,store,config):
                                 now=utc()
                                 result=await asyncio.to_thread(engine.context.infer,p,now)
                                 store.save('context_inference',str(uuid4()),p,now,result)
-                                # 追加: Context推定後に直近歩数をGrowingMap状態へ結合して蓄積する。
-                                from .insights import persist_state_step_snapshots
-                                persist_state_step_snapshots(store,p,now)
+                                # Legacy state IDs must not be attached to discovery embeddings.
+                                if engine.discovery is None:
+                                    from .insights import persist_state_step_snapshots
+                                    persist_state_step_snapshots(store,p,now)
                                 day=(dt(now)-timedelta(days=1)).date().isoformat()
                                 if reviewed.get(p)!=day:
-                                    if not any(r['kind']=='context_review' and r['payload']['day']==day for r in engine.rows(p)):
+                                    if not any(r['kind']=='context_review' and r['payload']['day']==day
+                                               and r['payload'].get('architecture','legacy')==engine.architecture for r in engine.rows(p)):
                                         await asyncio.to_thread(engine.context.review,p,day,now)
                                     reviewed[p]=day
                             except Exception:logging.exception('Behavior context worker failed; original records retained')
                         await asyncio.sleep(60)
-                tasks=[asyncio.create_task(inference_loop()),asyncio.create_task(training_loop()),asyncio.create_task(context_loop()),asyncio.create_task(context_training_loop())]
+                tasks=[asyncio.create_task(inference_loop()),asyncio.create_task(training_loop()),asyncio.create_task(context_loop())]
+                if engine.discovery is None:
+                    tasks.append(asyncio.create_task(context_training_loop()))
             try:yield
             finally:
                 for task in tasks:task.cancel()
