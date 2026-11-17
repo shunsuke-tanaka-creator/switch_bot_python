@@ -7,6 +7,15 @@ from .data_modes import data_mode
 def infer_state(engine,p,at=None,data_mode_='real'):
     data_mode_=data_mode(data_mode_)
     at=dt(at or datetime.now(timezone.utc));rows=engine.rows(p,data_mode_)
+    response=_infer_lstm(engine,p,at,data_mode_,rows)
+    from .delivery import apply_delivery
+    response=apply_delivery(engine,p,at,data_mode_,rows,response)
+    if response.get('current') is not None:
+        _comparisons(response,Timeline(rows),at)
+    return response
+
+
+def _infer_lstm(engine,p,at,data_mode_,rows):
     status=engine.status(p,data_mode_)
     response=dict(at=at.isoformat(timespec='milliseconds'),source='model',status='untrained',current=None,daily=None,comparisons={},activity=None,
                   data_mode=data_mode_,contains_sample=data_mode_!='real' or p==engine.sample_participant,model=status)
@@ -17,7 +26,8 @@ def infer_state(engine,p,at=None,data_mode_='real'):
     from .model import HierarchicalLSTM
     from .train import batch
     from .data import VERSION, FEATURES
-    state=torch.load(checkpoint,map_location='cpu',weights_only=True)
+    from .delivery import read_checkpoint
+    state,response['model_id']=read_checkpoint(checkpoint)
     if state.get('version')!=VERSION or state.get('features')!=FEATURES:
         response['status']='incompatible_checkpoint';return response
     timeline=Timeline(rows,text_model=engine.config.get('text_model') or state['report'].get('text_model'))
@@ -45,6 +55,12 @@ def infer_state(engine,p,at=None,data_mode_='real'):
             supported=state['report']['support'][scope][i]>=10 and valid['n']>=3
             response[scope][k]=dict(value=float(pred[i]) if supported else None,status='estimated' if supported else 'insufficient_labels',validation=valid)
     if all(v['value'] is None for scope in ('current','daily') for v in response[scope].values()):response['status']='insufficient_labels'
+    return response
+
+
+def _comparisons(response,timeline,at):
+    """Comparisons describe the delivered value, including provisional values."""
+    import numpy as np
     past=[l for l in timeline.labels if l.scope=='current' and l.available<at]
     activity=timeline.activity_at(at)
     groups={'all':past,'time':[l for l in past if l.at.hour==at.hour],
@@ -61,5 +77,4 @@ def infer_state(engine,p,at=None,data_mode_='real'):
                            z=(value-float(np.mean(values)))/max(float(np.std(values)),.5) if enough else None,
                            status='available' if enough else 'insufficient_data')
         response['comparisons'][name]=result
-    return response
 

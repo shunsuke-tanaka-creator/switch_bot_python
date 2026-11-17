@@ -400,7 +400,13 @@ def step_shortage(
 
 def fatigue_change(rows, at, base, prediction, delta_min=1.0, z_min=2.0):
     reference = base["fatigue"]
-    value = ((prediction or {}).get("current") or {}).get("fatigue", {}).get("value")
+    estimate = ((prediction or {}).get("current") or {}).get("fatigue", {})
+    # Legacy inference items had no source field and came only from the LSTM.
+    value = (
+        estimate.get("value")
+        if estimate.get("source", "lstm") == "lstm" and not estimate.get("provisional", False)
+        else None
+    )
     if reference["status"] != "available" or value is None:
         return dict(status="insufficient_data", acute=False, high=False)
     delta = value - reference["mean"]
@@ -410,7 +416,12 @@ def fatigue_change(rows, at, base, prediction, delta_min=1.0, z_min=2.0):
         if r["kind"] != "inference" or dt(r["at"]) < at - timedelta(minutes=15):
             continue
         p = r["payload"]
-        v = (p.get("current") or {}).get("fatigue", {}).get("value")
+        estimate = (p.get("current") or {}).get("fatigue", {})
+        v = (
+            estimate.get("value")
+            if estimate.get("source", "lstm") == "lstm" and not estimate.get("provisional", False)
+            else None
+        )
         if p.get("status") != "ready" or v is None:
             continue
         t = dt(r["at"])

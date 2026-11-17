@@ -68,6 +68,7 @@ def settings(rows):
         interventions_enabled=True,
         # 追加: 歩数同意とは独立した明示設定で、既定は無効。
         exercise_proposals_enabled=False,
+        baseline_estimates_enabled=False,
         daily_limit=4,
         intervention_limit=2,
         gap_minutes=60,
