@@ -39,12 +39,15 @@ def main(argv=None):
     if output.is_file():
         parser.error('output must be a dedicated directory')
     existing = output/'status.json'
+    checkpoints = ('active.pt','candidate.pt','previous.pt')
+    if any((output/name).exists() for name in checkpoints) and not existing.exists():
+        parser.error('Refusing existing checkpoints without discovery provenance')
     if existing.exists():
         try:
             previous = json.loads(existing.read_text(encoding='utf-8'))
         except (OSError, ValueError) as exc:
             parser.error(f'Cannot verify output directory: {exc}')
-        if previous.get('architecture')!='discovery':
+        if not isinstance(previous,dict) or previous.get('architecture')!='discovery':
             parser.error('Refusing to reuse a non-discovery model directory')
     from .discovery_learning import train_discovery
     result = train_discovery(payload['records'],output,args.at or datetime.now(timezone.utc),
