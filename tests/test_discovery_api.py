@@ -1,5 +1,6 @@
 """Compatibility smoke tests without private logs or a running server."""
 import json
+from threading import RLock
 from types import SimpleNamespace
 import pytest
 from research.data import dt
@@ -13,7 +14,7 @@ def test_untrained_context_insights_and_preview_do_not_run_legacy_map(tmp_path,m
     def forbidden(*args,**kwargs):
         raise AssertionError('Legacy insight pipeline must not run in discovery mode')
     monkeypatch.setattr(InsightEngine,'snapshot',forbidden)
-    store=SimpleNamespace(rows=lambda p:[])
+    store=SimpleNamespace(rows=lambda p:[],lock=RLock())
     engine=Engine(store,{'research_models':str(tmp_path),'research_architecture':'discovery'})
     at=dt('2026-01-05T12:00:00+09:00')
     context=engine.context.snapshot('test',at)
