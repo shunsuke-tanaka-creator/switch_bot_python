@@ -2,8 +2,16 @@
 from functools import lru_cache
 from pathlib import Path
 import hashlib
+import json
 import numpy as np
 from .data import TEXT_DIM
+
+
+def text_metadata(encoder):
+    if encoder is not None:
+        return dict(encoder.metadata)
+    return dict(backend='character-ngram', identity='character-ngram-v1',
+                output_dimension=TEXT_DIM, max_characters=4096)
 
 
 def encoder_identity(directory):
@@ -39,9 +47,18 @@ class LocalEncoder:
         if not root.is_dir():raise ValueError('text_model must be an existing local model directory')
         from sentence_transformers import SentenceTransformer
         self.model=SentenceTransformer(str(root),device='cpu',local_files_only=True,trust_remote_code=False)
+        self.model.eval()
+        self.model.requires_grad_(False)
         self.identity=encoder_identity(root)
         dimension = getattr(self.model, 'get_embedding_dimension', None)
         dims = dimension() if dimension is not None else self.model.get_sentence_embedding_dimension()
+        self.input_dimension = dims
+        self.directory = str(root)
+        source = root / 'source.json'
+        self.metadata = dict(backend='sentence-transformers', identity=self.identity,
+                             input_dimension=dims, output_dimension=TEXT_DIM, projection_seed=17,
+                             max_characters=4096, max_seq_length=self.model.max_seq_length,
+                             source=json.loads(source.read_text()) if source.exists() else None)
         self.projection=np.random.default_rng(17).normal(size=(dims,TEXT_DIM)).astype(np.float32)/np.sqrt(TEXT_DIM)
 
     @lru_cache(maxsize=10000)

@@ -24,5 +24,6 @@
   "typing_baseline_provisional_days": 3,
   "typing_fresh_seconds": 86400,
   "pattern_radius": 0.35,
-  "trend_min_weeks": 6
+  "trend_min_weeks": 6,
+  "text_model": "data/text-models/paraphrase-multilingual-MiniLM-L12-v2"
 }

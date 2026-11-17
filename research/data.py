@@ -14,7 +14,7 @@ JST = ZoneInfo('Asia/Tokyo')
 SCALES = ('mood', 'fatigue', 'stress', 'concentration', 'sleepiness')
 ACTIVITIES = 'desk_work meeting study cooking cleaning laundry shopping meal bath toilet dressing relax nap sleep_prep video game reading sns walk commute errand family friends call'.split()
 ACTIVITY_NAMES = dict(zip('デスクワーク 会議・打合せ 勉強・研究 料理 掃除 洗濯 買い物 食事 入浴 トイレ 身支度 くつろぎ 仮眠 就寝準備 テレビ・動画 ゲーム 読書 スマホ・SNS 散歩 通勤・通学 用事 家族と 友人と 通話'.split(), ACTIVITIES))
-# Text: local signed character 1/2/3-gram hashing, no external service or downloads.
+# Text: frozen local sentence embedding; character hashing is a legacy comparison.
 TEXT_DIM = 32
 BASE = ['key_count','delete_count','commit_chars','pause_count','mean_interval','max_interval',
         'observed_session','observation_age','heartbeat_age','collection_enabled',
@@ -77,6 +77,7 @@ class Label:
 
 class Timeline:
     def __init__(self, rows, text_model=None):
+        self.text_model = str(text_model) if text_model else None
         self.encoder = None
         if text_model:
             from .text import local_encoder

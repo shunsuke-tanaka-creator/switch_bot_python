@@ -64,5 +64,6 @@ def eligible_updates(examples, used, at):
 
 def sensor_timelines(timelines):
     # SSL never consumes questionnaire answers or correction-derived activity boundaries.
-    return {p: Timeline([r for r in timeline.rows if r['kind'] not in ('narrative', 'correction')])
+    return {p: Timeline([r for r in timeline.rows if r['kind'] not in ('narrative', 'correction')],
+                        text_model=timeline.text_model)
             for p, timeline in timelines.items()}

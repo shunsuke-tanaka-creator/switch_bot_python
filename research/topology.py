@@ -205,7 +205,7 @@ class GrowingMap:
         if (
             self.last
             and self.last != node["id"]
-            and (at - self.last_at).total_seconds() <= 12 * 3600
+            and 0 <= (at - self.last_at).total_seconds() <= 12 * 3600
         ):
             self.edges[(self.last, node["id"])] += 1
         self.last = node["id"]

@@ -298,6 +298,23 @@ def test_growing_map_masking_capacity_restart_and_novelty():
     assert behavior_map(windows, AT) == behavior_map(list(windows), AT)
 
 
+def test_growing_map_coordinate_means_and_state_change_counts():
+    model = GrowingMap(radius=0.1)
+    a = model.add('a1', AT, dict(a=0, b=0, c=0, optional=.02))
+    model.add('a2', AT + timedelta(minutes=1), dict(a=.03, b=0, c=0))
+    model.add('a3', AT + timedelta(minutes=2), dict(a=.06, b=0, c=0, optional=.04))
+    center = model.nodes[0]
+    assert center['center']['a'] == pytest.approx(.03)
+    assert center['center']['optional'] == pytest.approx(.03)
+    assert center['counts']['optional'] == 2  # Missing coordinate is not a zero.
+    b = model.add('b', AT + timedelta(minutes=3), dict(a=10, b=10, c=10))
+    assert model.export(AT + timedelta(minutes=3))['edges'] == [dict(source=a, target=b, count=1)]
+    # A,A,A,B records one state change, so Q_ab = 1, not 1/3.
+    model.add('a4', AT + timedelta(hours=13), dict(a=.03, b=0, c=0))
+    model.add('backward', AT, dict(a=10, b=10, c=10))
+    assert sum(model.edges.values()) == 1
+
+
 def test_typing_ignores_assessments_and_preserves_zero_vs_unknown():
     rows = [
         session(AT - timedelta(minutes=10), corrections=30),

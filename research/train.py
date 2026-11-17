@@ -142,6 +142,8 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
                     train_n=len(tr),validation_n=len(va),test_n=len(te),train_before=str(train_end),test_from=str(test_start),
                     support=support,activity_train_n=sum(l.scope=='activity' for l,_ in tr),text_model=text_model,text_identity=timeline.encoder.identity if timeline.encoder else 'character-ngram-v1',validation=metrics(model,va,device,mean,std),test=metrics(model,te,device,mean,std) if evaluate_test else None,
                     limitations=['Research estimate, not a diagnosis','Door opening does not establish occupancy',('Frozen local sentence encoder' if text_model else 'Character n-gram text features; no pretrained language encoder'),'Historical reception times are not known for legacy imports'])
+        from .text import text_metadata
+        report['text_encoder'] = text_metadata(timeline.encoder)
         report['run'] = run_metadata(seed, epochs, dict(model.settings, optimizer='AdamW', lr=.001, weight_decay=.001, batch_size=4, feature_version=VERSION),
                                     {name:[dict(id=l.id,at=l.at.isoformat(),available=l.available.isoformat()) for l,_ in items] for name,items in [('train',tr),('validation',va),('test',te)]})
         atomic_json(directory/'run.json', report['run'])
