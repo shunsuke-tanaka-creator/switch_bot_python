@@ -204,7 +204,8 @@ class ContextEngine:
         self.store.save("context_review", str(uuid4()), p, at, result)
         return result
 
-    def snapshot(self, p, at, rows=None):
+    def snapshot(self, p, at, rows=None, *, include_details=True):
+        """Keep reviews/history on the context endpoint; omit them for insights."""
         at = dt(at)
         rows = self.store.rows(p) if rows is None else rows
         result = summary(rows, at)
@@ -220,13 +221,16 @@ class ContextEngine:
                 )
                 for key, node in nodes.items()
             ]
-        result["reviews"] = [
-            r["payload"] for r in rows if r["kind"] == "context_review"
-        ][:7]
-        result["history"] = [
+        if include_details:
+            result["reviews"] = [
+                r["payload"] for r in rows if r["kind"] == "context_review"
+            ][:7]
+        history = [
             r["payload"] for r in reversed(rows) if r["kind"] == "context_inference"
         ][-288:]
-        result["edges"] = transitions(result["history"])
+        if include_details:
+            result["history"] = history
+        result["edges"] = transitions(history)
         path = self.directory(p) / "status.json"
         result["training"] = (
             json.loads(path.read_text()) if path.exists() else dict(status="untrained")

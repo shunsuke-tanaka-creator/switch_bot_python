@@ -173,11 +173,11 @@ class DiscoveryContext(ContextEngine):
         result["behavior"]=copy.deepcopy(result["task"])
         return result
 
-    def snapshot(self,p,at,rows=None):
+    def snapshot(self,p,at,rows=None,*,include_details=True):
         rows=self.store.rows(p) if rows is None else rows
         compatible=[r for r in rows if r["kind"] not in ("context_inference","context_review")
                     or r["payload"].get("architecture")=="discovery"]
-        result=super().snapshot(p,at,compatible)
+        result=super().snapshot(p,at,compatible,include_details=include_details)
         loaded=self.runtime.load(p)
         result.update(version=VERSION,architecture="discovery",task_role="behavior_wire_alias",
                       activity_role="posthoc_only",discovery_maps={})
