@@ -326,7 +326,7 @@ def install(app,store,config):
         records=engine.rows(p,data_mode_)
         prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,None,data_mode_)
         result=await asyncio.to_thread(engine.insights.snapshot,p,utc(),prediction,records,data_mode_)
-        result['context']=engine.context.snapshot(p,utc(),records) if data_mode_=='real' else dict(status='real_only')
+        result['context']=await asyncio.to_thread(engine.context.snapshot,p,utc(),records,include_details=False) if data_mode_=='real' else dict(status='real_only')
         result['preferences']=question_settings(engine.rows(p,'real'))
         result['data_mode']=data_mode_;result['contains_sample']=data_mode_!='real' or p==engine.sample_participant
         return result
