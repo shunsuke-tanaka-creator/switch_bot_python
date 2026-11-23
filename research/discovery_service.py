@@ -97,7 +97,8 @@ class DiscoveryRuntime:
         return result
 
     def infer(self, participant, at=None, mode="real", rows=None, retrospective=False, available_at=None):
-        at = self.engine.preview_at(participant,mode,at)
+        preview_at = getattr(self.engine, "preview_at", None)
+        at = dt(preview_at(participant,mode,at) if preview_at is not None else at or datetime.now(timezone.utc))
         known_at = dt(available_at or at)
         rows = self.engine.rows(participant,mode) if rows is None else rows
         if mode=="combined":
