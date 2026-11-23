@@ -32,6 +32,16 @@ class Store:
 
     def save(self, kind, identifier, participant, at, payload):
         with self.lock, self.db:
+            if participant.endswith("-sample"):
+                registered = self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sample_generations'").fetchone()
+                if registered and self.db.execute(
+                    "SELECT 1 FROM sample_generations WHERE sample_id=?", (participant,)).fetchone():
+                    existing = self.db.execute("SELECT at,payload FROM records WHERE participant=? AND kind=? AND id=?",
+                                               (participant, kind, identifier)).fetchone()
+                    if existing and existing["at"] == stamp(at) and json.loads(existing["payload"]) == payload:
+                        return False
+                    raise RuntimeError("registered sample generations are immutable")
             cur = self.db.execute("INSERT OR IGNORE INTO records(participant,kind,id,at,payload) VALUES(?,?,?,?,?)",
                                   (participant, kind, identifier, stamp(at), json.dumps(payload, ensure_ascii=False)))
             return cur.rowcount == 1

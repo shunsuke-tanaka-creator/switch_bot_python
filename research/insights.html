@@ -325,6 +325,8 @@
           const d = await request(api + "/insights?data_mode=" + dataMode);
           snapshot = d;
           $("error").textContent = "";
+          if(dataMode !== "real") $("sampleWarning").textContent =
+            `サンプルを含む読み取り専用プレビューです。質問回答・設定変更はできません。表示元: ${d.sensor_source || d.sample_generation || "サンプル"}。合成データの評価は実データの予測性能を示しません。`;
           const f = d.fatigue,
             t = d.typing;
           $("fatigue").textContent =

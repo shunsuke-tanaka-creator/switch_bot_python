@@ -48,7 +48,42 @@ def annotation_digest(rows):
     return hashlib.sha256(json.dumps(sorted(relevant, key=lambda v: v[0]), sort_keys=True).encode()).hexdigest()
 
 
+class SourceTimelines:
+    """Discovery examples retain their own Timeline, including next-bin targets."""
+    def __init__(self, timelines):
+        self.timelines = timelines
+        self.encoder = next(iter(timelines.values())).encoder
+
+    def sample(self, at, scope="current", source=None):
+        if source is None:
+            from .data import inference_rows
+            _, source = inference_rows([r for t in self.timelines.values() for r in t.rows], at)
+        return self.timelines[source].sample(at, scope)
+
+
 def examples_for(rows, at, text_model=None):
+    groups = {}
+    for row in rows:
+        groups.setdefault(row.get("participant", ""), []).append(row)
+    if len(groups) <= 1:
+        return _source_examples(rows, at, text_model)
+    times = cutoffs(observations(source_rows(rows, dt(at))), dt(at))
+    dates = sorted({t.date() for t in times})
+    if len(dates) < 3:
+        return _source_examples(rows, at, text_model)
+    boundaries = (dt(str(dates[max(1, int(len(dates)*.65))]) + "T00:00:00+09:00"),
+                  dt(str(dates[max(2, int(len(dates)*.85))]) + "T00:00:00+09:00"))
+    timelines, examples = {}, []
+    for source, group in groups.items():
+        timeline, subset, _ = _source_examples(group, at, text_model, boundaries)
+        timelines[source] = timeline
+        examples.extend(dict(e, source=source) for e in subset)
+    split = dict(train_before=boundaries[0].isoformat(), test_from=boundaries[1].isoformat(),
+                 windows=len(times), days=len(dates))
+    return SourceTimelines(timelines), sorted(examples, key=lambda e: (e["at"], e["source"])), split
+
+
+def _source_examples(rows, at, text_model=None, boundaries=None):
     """Observation-based day split; questionnaires never change input boundaries."""
     at = dt(at)
     rows = source_rows(rows, at)
@@ -56,10 +91,11 @@ def examples_for(rows, at, text_model=None):
     timeline = Timeline(observed, text_model=text_model)
     times = cutoffs(observed, at)
     dates = sorted({t.date() for t in times})
-    if len(times) < 12 or len(dates) < 3:
+    if boundaries is None and (len(times) < 12 or len(dates) < 3):
         return timeline, [], dict(status="insufficient_observations", windows=len(times), days=len(dates))
-    validation_at = dt(str(dates[max(1, int(len(dates)*0.65))]) + "T00:00:00+09:00")
-    test_at = dt(str(dates[max(2, int(len(dates)*0.85))]) + "T00:00:00+09:00")
+    validation_at, test_at = boundaries or (
+        dt(str(dates[max(1, int(len(dates)*0.65))]) + "T00:00:00+09:00"),
+        dt(str(dates[max(2, int(len(dates)*0.85))]) + "T00:00:00+09:00"))
     ends = dict(train=validation_at, validation=test_at, test=at + timedelta(microseconds=1))
     def split(t):
         return "train" if t < validation_at else "validation" if t < test_at else "test"
@@ -147,7 +183,15 @@ def build_maps(model, examples, timeline, rows, before, device, mean, std):
                 t = dt(node["anchor"])
                 if t >= before or not fresh(observations(rows), t):
                     continue
-                out = model(batch([timeline.sample(t)], device, mean, std))
+                if isinstance(timeline, SourceTimelines):
+                    source = next((r.get("participant", "") for r in rows
+                                   if r["kind"] in ("research_event", "context_candidate")
+                                   and (r["payload"].get("class_id") == key
+                                        or r["payload"].get("payload", {}).get("class_id") == key)), None)
+                    sample = timeline.sample(t, source=source)
+                else:
+                    sample = timeline.sample(t)
+                out = model(batch([sample], device, mean, std))
                 maps[axis].seed(out[axis][0].cpu().numpy(), key, t.isoformat(), node["confirmed"])
         for e in sorted(examples, key=lambda e: e["at"]):
             out = model(batch([e["sample"]], device, mean, std))
@@ -175,7 +219,7 @@ def map_metrics(model, examples, maps, device, mean, std):
 
 def train_discovery(rows, directory, at, epochs=12, hidden=48, text_model=None,
                     device="cpu", force=False, evaluate_test=False,
-                    data_mode="real", contains_sample=False):
+                    data_mode="real", contains_sample=False, sample_manifest_hash=None):
     if epochs < 1:
         raise ValueError("epochs must be positive")
     from .context_learning import device_for
@@ -202,6 +246,7 @@ def train_discovery(rows, directory, at, epochs=12, hidden=48, text_model=None,
         timeline, examples, split = examples_for(sanitized, at, text_model)
         report = dict(version=VERSION, architecture="discovery", experiment_id=run_id, fingerprint=run_id,
                       data_mode=data_mode, contains_sample=contains_sample,
+                      sample_manifest_hash=sample_manifest_hash,
                       trained_through=at.isoformat(), activity_role="posthoc_only", seed=37,
                       text_model=str(text_model) if text_model else None,
                       text_identity=signature["text"], annotation_digest=annotation_digest(sanitized), **split)
@@ -258,7 +303,8 @@ def train_discovery(rows, directory, at, epochs=12, hidden=48, text_model=None,
             for label in Timeline(available_rows(rows,at)).labels:
                 if label.scope != "activity" or max(label.at,label.available) >= dt(split["train_before"]):
                     continue
-                out = model(batch([timeline.sample(label.at)],dev,mean,std))
+                sample = timeline.sample(label.at, source=label.source) if isinstance(timeline, SourceTimelines) else timeline.sample(label.at)
+                out = model(batch([sample],dev,mean,std))
                 key = maps["behavior"].predict(out["behavior"][0].cpu().numpy())["candidate_id"]
                 if key:
                     maps["behavior"].annotate(key, ACTIVITIES[label.activity])
@@ -270,6 +316,17 @@ def train_discovery(rows, directory, at, epochs=12, hidden=48, text_model=None,
                       example_times={s:[e["at"].isoformat() for e in es] for s,es in (("train",tr),("validation",va),("test",te))},
                       limitations=["Axis separation is not guaranteed", "Cosine similarity is not calibrated",
                                    "Maps are rebuilt on training data; live inference is frozen", "No fixed activity classifier"])
+        report["support_by_source"] = {
+            source: {scope: {name: dict(
+                train=int(sum(e["sample"].timeline.rows[0].get("participant", "") == source
+                              and np.isfinite(e["scores"][scope][i]) for e in tr)),
+                validation=int(sum(e["sample"].timeline.rows[0].get("participant", "") == source
+                                   and np.isfinite(e["scores"][scope][i]) for e in va)))
+                for i,name in enumerate(SCALES)} for scope in ("current","daily")}
+            for source in {r.get("participant", "") for r in sanitized}}
+        report["validation_by_source"] = {
+            source: evaluate(model,[e for e in va if e["sample"].timeline.rows[0].get("participant", "") == source],dev,mean,std)
+            for source in report["support_by_source"]}
         promoted = True
         if active.exists():
             old = torch.load(active,map_location=dev,weights_only=True)

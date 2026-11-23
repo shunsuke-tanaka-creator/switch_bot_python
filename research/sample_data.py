@@ -256,7 +256,7 @@ def summarize(rows):
 
 
 def generate_sample(
-    calendar_path,
+    calendar_path=None,
     sample_participant="p001-sample",
     source_participant="p001",
     store=None,
@@ -264,7 +264,21 @@ def generate_sample(
     dry_run=False,
     include_today=False,
     now=None,
+    tendencies=None,
+    weeks=8,
+    seed=17,
+    scenario="personalized",
+    require_gates=False,
 ):
+    if tendencies is not None:
+        if calendar_path or include_today:
+            raise ValueError("personalized generation uses its profile period; omit --calendar/--include-today")
+        from .personalized_sample import generate_personalized_sample
+        return generate_personalized_sample(tendencies, store=store, weeks=weeks, seed=seed,
+                    scenario=scenario, require_gates=require_gates, dry_run=dry_run,
+                    manifest_path=manifest_path, source_participant=source_participant)
+    if calendar_path is None:
+        raise ValueError("--calendar or --tendencies is required")
     if sample_participant == source_participant:
         raise ValueError("sample participant must differ from source participant")
     if not sample_participant.endswith('-sample') or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', sample_participant):

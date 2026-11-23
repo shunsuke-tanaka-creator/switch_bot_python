@@ -76,7 +76,7 @@ def persist_step_snapshot(store, participant, session_id, payload, fresh_seconds
 
 
 # 追加: GrowingMapの状態割当てと鮮度付き歩数を、今後の状態別基準として結合保存する。
-def persist_state_step_snapshots(store, participant, at, fresh_seconds=900):
+def persist_state_step_snapshots(store, participant, at, fresh_seconds=900, *, windows=None):
     at = dt(at)
     rows = available_rows(store.rows(participant), at)
     saved = {
@@ -93,7 +93,7 @@ def persist_state_step_snapshots(store, participant, at, fresh_seconds=900):
     ]
     if not snapshots:
         return 0
-    patterns = behavior_map(typing_windows(rows, at), at, rows=rows)
+    patterns = behavior_map(typing_windows(rows, at) if windows is None else windows, at, rows=rows)
     nodes = {node["id"]: node for node in patterns["nodes"]}
     assignments = [
         assignment
@@ -559,6 +559,17 @@ class InsightEngine:
     def snapshot(self, p, at, prediction=None, rows=None, data_mode="real"):
         at = dt(at)
         rows = available_rows(self.store.rows(p) if rows is None else rows, at)
+        if data_mode == "combined":
+            from .data import inference_rows
+            groups = {}
+            for row in rows:
+                groups.setdefault(row["participant"], []).append(row)
+            if groups:
+                _, selected = inference_rows(rows, at, p)
+                by_source = {owner: self.snapshot(owner, at, prediction if owner == selected else None,
+                              group, "sample" if owner.endswith("-sample") else "real")
+                             for owner, group in groups.items()}
+                return dict(by_source[selected], by_source=by_source, sensor_source=selected, preview_support=True)
         rows = [r for r in rows if not (r["kind"] == "research_event" and r["payload"]["kind"] == "place_visit")]
         source = [
             r
@@ -655,7 +666,9 @@ class InsightEngine:
         exercise = step_shortage(
             rows,
             at,
-            participant=p,
+            participant=(next((r["participant"] for r in reversed(rows)
+                               if r["kind"] in ("state_step_snapshot", "step_snapshot", "session")), p)
+                         if data_mode == "sample" else p),
             state_aliases=fixed["patterns"].get("aliases"),
             provisional_days=self.config.get("exercise_baseline_provisional_days", 3),
             formal_days=self.config.get("exercise_baseline_days", 5),

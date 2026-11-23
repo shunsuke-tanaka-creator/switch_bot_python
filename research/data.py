@@ -73,6 +73,7 @@ class Label:
     values: np.ndarray
     activity: int = -1
     id: str = ''
+    source: str = ''
 
 
 class Timeline:
@@ -120,6 +121,11 @@ class Timeline:
                     if activity in ACTIVITIES:
                         self.labels.append(Label(cutoff, at, 'activity', np.full(5, np.nan, np.float32), ACTIVITIES.index(activity), r['id']))
         self.events.sort(key=lambda e: e[0])
+        self.event_arrivals = [dt(e[2].get('_available_at', e[2].get('received_at', e[0]))) for e in self.events]
+        self.visible_events = lru_cache(maxsize=2)(self.visible_events)
+        sources = {r['id']: r.get('participant', '') for r in self.rows}
+        for label in self.labels:
+            label.source = sources.get(label.id, sources.get(label.id.removesuffix(':activity'), ''))
         self.features = lru_cache(maxsize=12000)(self.features)
         self.labels.sort(key=lambda l: l.at)
         self.event_times = [e[0] for e in self.events]
@@ -153,14 +159,30 @@ class Timeline:
         prior = [l for l in self.labels if l.scope == 'activity' and l.available <= at and 0 <= (at-l.at).total_seconds() <= 1800]
         return prior[-1].activity if prior else -1
 
+    def visible_events(self, available_at):
+        """Index one causal reception snapshot for all bins of a lazy sample."""
+        visible = [e for e, received in zip(self.events, self.event_arrivals) if received <= available_at]
+        grouped = {}
+        for e in visible:
+            grouped.setdefault(e[1], []).append(e)
+            if e[1] in ('switchbot', 'switchbot_observation'):
+                for prefix, word in [('door_sensor', '玄関'), ('room_sensor', '寝室')]:
+                    if word in e[2].get('name', ''):
+                        grouped.setdefault(prefix, []).append(e)
+        return visible, [e[0] for e in visible], {k: (v, [e[0] for e in v]) for k, v in grouped.items()}
+
     def features(self, start, end, available_at=None):
         # Event time selects the bin; arrival time is compared with the prediction cutoff.
         available_at = end if available_at is None else dt(available_at)
-        vals = {}; stop=bisect_right(self.event_times,end)
-        recent=[e for e in self.events[:stop] if dt(e[2].get('_available_at',e[2].get('received_at',e[0])))<=available_at]
-        window=[e for e in recent if start<e[0]<=end]
+        vals = {}
+        visible, times, grouped = self.visible_events(available_at)
+        window = visible[bisect_right(times, start):bisect_right(times, end)]
+        def latest(kind):
+            events, event_times = grouped.get(kind, ([], []))
+            stop = bisect_right(event_times, end)
+            return events[stop - 1] if stop else None
         # Without coverage, no key events is unknown; observed non-use is represented by presence mask.
-        heart = next((e for e in reversed(recent) if e[1] == 'heartbeat'), None)
+        heart = latest('heartbeat')
         if heart:
             age = (end-heart[0]).total_seconds()
             vals['heartbeat_age'] = min(age/3600, 24)
@@ -168,7 +190,7 @@ class Timeline:
                 enabled = heart[2].get('logging_enabled')
                 if enabled is not None: vals['collection_enabled'] = float(enabled)
         sessions = [e for e in window if e[1] == 'session']
-        latest_session = next((e for e in reversed(recent) if e[1] == 'session'), None)
+        latest_session = latest('session')
         if latest_session: vals['observation_age'] = min((end-latest_session[0]).total_seconds()/3600, 24)
         keys = [e[0] for e in window if e[1] == 'key']
         coverage = bool(sessions or keys or (heart and (end-heart[0]).total_seconds() <= 300 and heart[2].get('logging_enabled')))
@@ -200,7 +222,7 @@ class Timeline:
                         ev = c['calendar_events']; vals['calendar_count'] = math.log1p(len(ev))
                         vals['calendar_busy'] = float(any(dt(x['start']) <= end < dt(x['end']) for x in ev))
         for prefix, word in [('door','玄関'),('room','寝室')]:
-            sensor = next((e for e in reversed(recent) if e[1] in ('switchbot','switchbot_observation') and word in e[2].get('name','')), None)
+            sensor = latest(prefix + '_sensor')
             if sensor:
                 age = (end-sensor[0]).total_seconds(); vals[prefix+'_age'] = min(age/3600,24)
                 # Requires periodic BLE observations, not just door transitions.
@@ -284,3 +306,37 @@ class LazySample(Mapping):
 
 def materialize(sample):
     return sample.materialize() if isinstance(sample, LazySample) else sample
+
+
+def source_timelines(rows, text_model=None):
+    """Build sensor history, personal baselines and lazy examples per participant."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(row.get('participant', ''), []).append(row)
+    return {source: Timeline(group, text_model=text_model) for source, group in groups.items()}
+
+
+def training_examples(rows, text_model=None):
+    timelines = source_timelines(rows, text_model)
+    if len(timelines) == 1:
+        return timelines, next(iter(timelines.values())).examples()
+    return timelines, sorted((example for t in timelines.values() for example in t.examples()),
+                             key=lambda e: (e[0].at, e[0].source, e[0].id))
+
+
+def inference_rows(rows, at, preferred_source=None):
+    """Choose one source's causal sensor history for a combined prediction."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(row.get('participant', ''), []).append(row)
+    if len(groups) <= 1:
+        return rows, next(iter(groups), None)
+    def latest(group):
+        return max((dt(r['at']) for r in group if r['kind'] in ('session', 'heartbeat', 'switchbot', 'switchbot_observation')
+                    and dt(r['at']) <= at and dt(r['payload'].get('received_at', r['at'])) <= at), default=None)
+    fresh = {source: latest(group) for source, group in groups.items()}
+    if preferred_source in fresh and fresh[preferred_source] and at - fresh[preferred_source] <= timedelta(hours=1):
+        source = preferred_source
+    else:
+        source = max(groups, key=lambda source: fresh[source] or datetime.min.replace(tzinfo=JST))
+    return groups[source], source

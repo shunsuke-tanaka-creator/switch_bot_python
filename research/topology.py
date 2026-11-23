@@ -5,6 +5,7 @@ Replaying append-only source records reconstructs nodes/edges after restart or r
 """
 
 from collections import Counter
+from bisect import bisect_left, bisect_right
 from datetime import timedelta
 import hashlib
 import math
@@ -246,16 +247,18 @@ def behavior_map(windows, at, radius=0.35, rows=()):
     # 追加: 永続化済みContext推定から、各窓を特徴づける場所・アクションを解決する。
     visible = available_rows(rows, at)
     context_rows = [r for r in visible if r["kind"] == "context_inference"]
+    context_times = [dt(r["at"]) for r in context_rows]
     from .context_data import catalog, resolve
 
     classes, aliases = catalog(visible, at)
 
     def labels_for(window):
+        first = bisect_left(context_times, window["end"] - timedelta(minutes=10))
+        last = bisect_right(context_times, window["end"] + timedelta(minutes=10))
         candidates = [
             r
-            for r in context_rows
-            if abs((dt(r["at"]) - window["end"]).total_seconds()) <= 10 * 60
-            and (r["payload"].get("place") or {}).get("id")
+            for r in context_rows[first:last]
+            if (r["payload"].get("place") or {}).get("id")
             and (r["payload"].get("task") or {}).get("id")
         ]
         if not candidates:

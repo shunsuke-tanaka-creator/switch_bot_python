@@ -152,6 +152,18 @@ class Engine:
 
     def rows(self,p,data_mode_='real'):
         return rows_for_mode(self.store,identifier(p),data_mode(data_mode_),self.sample_participant)
+    def preview_at(self,p,data_mode_='real',at=None):
+        if at is not None or data_mode_=='real':
+            return dt(at or utc())
+        from .sample_registry import active_manifest
+        manifest=active_manifest(self.store,p)
+        if manifest and manifest.get('preview_at'):
+            if data_mode_=='sample':
+                return dt(manifest['preview_at'])
+            observed=[dt(r['payload'].get('received_at',r['at'])) for r in self.rows(p,data_mode_)
+                      if r['kind']=='session' and not r['participant'].endswith('-sample')]
+            return max([dt(manifest['preview_at']),*observed])
+        return dt(utc())
     def directory(self,p,data_mode_='real'):
         return self.root/identifier(p)/data_mode(data_mode_)
     def legacy_directory(self,p):return self.root/identifier(p)
@@ -170,6 +182,15 @@ class Engine:
         result=json.loads(path.read_text()) if path.exists() else dict(status='untrained')
         result.setdefault('data_mode',data_mode_)
         result.setdefault('contains_sample',data_mode_!='real' or p==self.sample_participant)
+        if data_mode_!='real':
+            from .sample_registry import active_generation
+            selected=active_generation(self.store,p,self.sample_participant)
+            result['sample_generation']=selected
+            result['preview_support']=True
+            from .data_modes import source_identity
+            identity=source_identity(self.store,p,data_mode_,self.sample_participant,self.sample_manifest)
+            if result.get('sample_manifest_hash')!=identity['sample_manifest_hash'] and result.get('status')=='trained':
+                result['status']='generation_changed'
         error=self.read_path(p,data_mode_,'error.json')
         if error.exists():result['last_error']=json.loads(error.read_text())
         return result
@@ -194,9 +215,9 @@ class Engine:
         if self.config.get('research_require_cuda'):
             import torch
             if not torch.cuda.is_available():raise RuntimeError('CUDA unavailable; check the GPU driver and CUDA-enabled PyTorch')
-        rows=self.rows(p,data_mode_)
+        from .data_modes import mode_snapshot
+        rows,identity=mode_snapshot(self.store,p,data_mode_,self.sample_participant,self.sample_manifest)
         count=len(Timeline(rows).labels)
-        identity=source_identity(self.store,p,data_mode_,self.sample_participant,self.sample_manifest)
         status=self.status(p,data_mode_)
         from .provenance import experiment_id
         from .text import encoder_identity
@@ -220,7 +241,8 @@ class Engine:
         return result
 
     def pending(self,p,at=None):
-        if p==self.sample_participant:return None
+        from .sample_registry import is_sample_participant
+        if is_sample_participant(p):return None
         return self.questions.pending(p,dt(at or utc()))
 
     def proposal_preview(self,p,data_mode_='real',at=None):
@@ -229,7 +251,7 @@ class Engine:
         Mode rows drive insights and answer-dependent trigger chains, while the
         participant's real rows exclusively drive pending/budget/gap queue state.
         """
-        data_mode_=data_mode(data_mode_);at=dt(at or utc())
+        data_mode_=data_mode(data_mode_);at=self.preview_at(p,data_mode_,at)
         records=self.rows(p,data_mode_)
         prediction=None if data_mode_=='real' else self.infer(p,at,data_mode_)
         insight=self.insights.snapshot(p,at,prediction,records,data_mode_)
@@ -245,34 +267,44 @@ class Engine:
         rows=self.rows(p,data_mode_);nodes={};edges=[]
         for r in rows:
             if r['kind'] not in {'session','narrative','switchbot','correction','inference','step_snapshot','state_step_snapshot'}:continue
-            at=dt(r['at']);week='week:'+monday(at).date().isoformat();day='day:'+at.date().isoformat();work='work:'+at.replace(minute=0,second=0,microsecond=0).isoformat()
-            for key,kind in [(week,'Pattern'),(day,'Day'),(work,'StateEpisode')]:nodes[key]=dict(id=key,kind=kind)
-            key=r['kind']+':'+r['id'];nodes[key]=dict(id=key,kind='Observation',source=r['kind'],at=r['at'])
+            prefix=r['participant']+':' if data_mode_!='real' else ''
+            provenance=(dict(participant=r['participant'],data_source='synthetic' if r['participant'].endswith('-sample') else 'real')
+                        if data_mode_!='real' else {})
+            at=dt(r['at']);week=prefix+'week:'+monday(at).date().isoformat();day=prefix+'day:'+at.date().isoformat();work=prefix+'work:'+at.replace(minute=0,second=0,microsecond=0).isoformat()
+            for key,kind in [(week,'Pattern'),(day,'Day'),(work,'StateEpisode')]:nodes[key]=dict(id=key,kind=kind,**provenance)
+            key=prefix+r['kind']+':'+r['id'];nodes[key]=dict(id=key,kind='Observation',source=r['kind'],at=r['at'],**provenance)
             edges.extend([dict(source=key,target=work,kind='provenance'),dict(source=work,target=day,kind='part_of'),dict(source=day,target=week,kind='part_of')])
             if r['kind']=='correction':nodes[key]['interval']=[r['payload']['start'],r['payload']['end']]
         # 追加: 運動提案の状態・通常歩数・不足・METs候補をPMTTへ残す。
         for r in rows:
             if r['kind']!='question_issued' or r['payload'].get('kind')!='exerciseProposal':continue
-            key='proposal:'+r['id'];evidence=r['payload']['pmtt']
+            prefix=r['participant']+':' if data_mode_!='real' else ''
+            key=prefix+'proposal:'+r['id'];evidence=r['payload']['pmtt']
             nodes[key]=dict(id=key,kind='ExerciseProposal',at=r['at'],evidence=evidence)
-            source='state_step_snapshot:'+evidence['evidence_id']
-            if source not in nodes:source='session:'+evidence['evidence_id']
+            source=prefix+'state_step_snapshot:'+evidence['evidence_id']
+            if source not in nodes:source=prefix+'session:'+evidence['evidence_id']
             if source in nodes:edges.append(dict(source=source,target=key,kind='supports'))
         from .context_data import catalog
-        classes,aliases=catalog(rows,dt(utc()))
         from .context_data import resolve
-        for axis in ('place','task'):
-            for item in classes[axis].values():
-                nodes[item['id']]=dict(id=item['id'],kind='ContextPlace' if axis=='place' else 'ContextTask',name=item['name'],confirmed=item['confirmed'])
-        for r in rows:
-            if r['kind']!='context_inference':continue
-            key='context:'+r['id'];nodes[key]=dict(id=key,kind='ContextEpisode',at=r['at'],source='live_inference',architecture=r['payload'].get('architecture','legacy'))
+        groups={}
+        for r in rows:groups.setdefault(r['participant'],[]).append(r)
+        for owner,group in groups.items():
+            classes,aliases=catalog(group,self.preview_at(p,data_mode_))
+            prefix=owner+':' if data_mode_!='real' else ''
+            provenance=dict(participant=owner,data_source='synthetic' if owner.endswith('-sample') else 'real') if data_mode_!='real' else {}
             for axis in ('place','task'):
-                value=r['payload'].get(axis) or {};target=value.get('id')
-                if target:
-                    target=resolve(aliases[axis],target)
-                    nodes.setdefault(target,dict(id=target,kind='ContextPlace' if axis=='place' else 'ContextTask'))
-                    edges.append(dict(source=key,target=target,kind=axis,provenance=value.get('source')))
+                for item in classes[axis].values():
+                    key=prefix+item['id']
+                    nodes[key]=dict(id=key,kind='ContextPlace' if axis=='place' else 'ContextTask',name=item['name'],confirmed=item['confirmed'],**provenance)
+            for r in group:
+                if r['kind']!='context_inference':continue
+                key=prefix+'context:'+r['id'];nodes[key]=dict(id=key,kind='ContextEpisode',at=r['at'],source='synthetic' if owner.endswith('-sample') else 'live_inference',architecture=r['payload'].get('architecture','legacy'),**provenance)
+                for axis in ('place','task'):
+                    value=r['payload'].get(axis) or {};target=value.get('id')
+                    if target:
+                        target=prefix+resolve(aliases[axis],target)
+                        nodes.setdefault(target,dict(id=target,kind='ContextPlace' if axis=='place' else 'ContextTask',**provenance))
+                        edges.append(dict(source=key,target=target,kind=axis,provenance=value.get('source')))
         unique={json.dumps(e,sort_keys=True):e for e in edges}
         return dict(nodes=list(nodes.values()),edges=list(unique.values()))
 
@@ -341,11 +373,15 @@ def install(app,store,config):
         forwarded=await proxy(f'/api/research/{p}/insights?data_mode={data_mode_}')
         if forwarded:return forwarded
         records=engine.rows(p,data_mode_)
-        prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,None,data_mode_)
-        result=await asyncio.to_thread(engine.insights.snapshot,p,utc(),prediction,records,data_mode_)
+        at=engine.preview_at(p,data_mode_)
+        prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,at,data_mode_)
+        result=await asyncio.to_thread(engine.insights.snapshot,p,at,prediction,records,data_mode_)
         result['context']=await asyncio.to_thread(engine.context.snapshot,p,utc(),records,include_details=False) if data_mode_=='real' else dict(status='real_only')
         result['preferences']=question_settings(engine.rows(p,'real'))
         result['data_mode']=data_mode_;result['contains_sample']=data_mode_!='real' or p==engine.sample_participant
+        if data_mode_!='real':
+            result['sample_generation']=engine.status(p,data_mode_).get('sample_generation')
+            result['preview_support']=True
         return result
 
     @app.get('/research/{participant}/context',response_class=HTMLResponse)
@@ -398,7 +434,9 @@ def install(app,store,config):
                 item.setdefault('source','lstm')
                 item.setdefault('provisional',False)
                 item.setdefault('baseline_method',None)
-        answers=[dict(at=r['at'],kind=r['payload'].get('question',{}).get('kind'),answer=r['payload'].get('answer')) for r in records if r['kind']=='narrative']
+        answers=[dict(at=r['at'],kind=r['payload'].get('question',{}).get('kind'),answer=r['payload'].get('answer'),
+                      **(dict(participant=r['participant'],source='synthetic' if r['participant'].endswith('-sample') else 'real')
+                         if data_mode_!='real' else {})) for r in records if r['kind']=='narrative']
         return dict(prediction=prediction,model=engine.status(p,data_mode_),answers=answers[:500],activity_catalog=ACTIVITIES,
                     architecture=engine.architecture,activity_role='posthoc_only' if engine.discovery is not None else 'auxiliary',
                     corrections=[r['payload'] for r in records if r['kind']=='correction'][:100],
@@ -511,5 +549,5 @@ def install(app,store,config):
 
 
 def participants(store,sample_participant=DEFAULT_SAMPLE_PARTICIPANT):
-    with store.lock:
-        return [r[0] for r in store.db.execute('SELECT DISTINCT participant FROM records') if r[0]!=sample_participant]
+    from .sample_registry import real_participants
+    return real_participants(store,sample_participant)

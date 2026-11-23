@@ -33,6 +33,11 @@ function renderModel(model){
   if(m.days!=null&&m.required_days!=null)row(table,['対象日数',m.days+' / '+m.required_days+' 日']);
   if(m.data_mode!=null)row(table,['データモード',m.data_mode+(m.contains_sample===true?'（サンプル含む）':'')]);
   if(m.training_record_count!=null)row(table,['学習レコード数',m.training_record_count+' 件']);
+  if(m.sample_generation)row(table,['サンプル世代',m.sample_generation]);
+  for(const [source,scopes] of Object.entries(m.support_by_source??{})){
+    const label=source.endsWith('-sample')?'サンプル支持':'実データ支持';
+    for(const [scope,items] of Object.entries(scopes))row(table,[label+' '+source+' '+scope,Object.entries(items).map(([name,v])=>(names[name]??name)+': '+v.train+'/'+v.validation).join(' ／ ')+'（学習/検証）']);
+  }
   rawJSON(container,model);
 }
 function kindCounts(items){

@@ -40,12 +40,22 @@ class DiscoveryRuntime:
         key = (str(path), stat.st_mtime_ns, stat.st_size)
         cached = self.cache.get(key)
         if cached is not None:
+            if mode!="real":
+                from .data_modes import source_identity
+                identity=source_identity(self.store,participant,mode,self.engine.sample_participant,self.engine.sample_manifest)
+                if cached[0]["report"].get("sample_manifest_hash")!=identity["sample_manifest_hash"]:
+                    return None
             return cached
         import torch
         from .discovery_model import DiscoveryModel
         state = torch.load(path, map_location="cpu", weights_only=True)
         if state.get("version")!=VERSION or state.get("features")!=FEATURES:
             return None
+        if mode!="real":
+            from .data_modes import source_identity
+            identity=source_identity(self.store,participant,mode,self.engine.sample_participant,self.engine.sample_manifest)
+            if state["report"].get("sample_manifest_hash")!=identity["sample_manifest_hash"]:
+                return None
         model = DiscoveryModel(**state["settings"])
         model.load_state_dict(state["weights"]); model.eval()
         maps = {a:DiscoveryMap.from_dict(s) for a,s in state["maps"].items()}
@@ -61,12 +71,15 @@ class DiscoveryRuntime:
             import torch
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA required but unavailable")
+        from .data_modes import mode_snapshot
+        rows,identity=mode_snapshot(self.store,participant,mode,self.engine.sample_participant,self.engine.sample_manifest)
         result = train_discovery(
-            self.engine.rows(participant,mode), self.directory(participant,mode),
-            datetime.now(timezone.utc), epochs=self.config.get("discovery_epochs",12),
+            rows, self.directory(participant,mode),
+            self.engine.preview_at(participant,mode), epochs=self.config.get("discovery_epochs",12),
             hidden=self.config.get("discovery_hidden",48), text_model=self.config.get("text_model"),
             device=self.config.get("context_device","auto"), force=force,
             data_mode=mode, contains_sample=mode!="real" or participant==self.engine.sample_participant,
+            sample_manifest_hash=identity["sample_manifest_hash"],
         )
         self.cache.clear()
         loaded = self.load(participant,mode)
@@ -84,14 +97,20 @@ class DiscoveryRuntime:
         return result
 
     def infer(self, participant, at=None, mode="real", rows=None, retrospective=False, available_at=None):
-        at = dt(at or datetime.now(timezone.utc))
+        preview_at = getattr(self.engine, "preview_at", None)
+        at = dt(preview_at(participant,mode,at) if preview_at is not None else at or datetime.now(timezone.utc))
         known_at = dt(available_at or at)
         rows = self.engine.rows(participant,mode) if rows is None else rows
+        if mode=="combined":
+            from .data import inference_rows
+            rows, sensor_source = inference_rows(rows,known_at,participant)
         result = dict(at=at.isoformat(),available_at=known_at.isoformat(),architecture="discovery",version=VERSION,
                       source="model",status="untrained",current=None,daily=None,comparisons={},activity=None,
                       activity_role="posthoc_only",place=None,behavior=None,task=None,gps_used=False,
                       data_mode=mode,contains_sample=mode!="real" or participant==self.engine.sample_participant,
                       mode="review" if retrospective else "live")
+        if mode=="combined":
+            result["sensor_source"]=sensor_source
         loaded = self.load(participant,mode)
         if not loaded:
             if (self.directory(participant,mode)/"active.pt").exists():
