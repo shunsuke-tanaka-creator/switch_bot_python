@@ -98,7 +98,10 @@ def test_all_export_replication_corrections_and_heartbeat(tmp_path):
             assert len(target.rows('p001'))==2
         assert c.get('/api/research/p001/overview').json()['prediction']['current'] is None
         assert c.get('/research/p001').status_code==200
-        graph=c.get('/api/research/p001/pmtt').json();assert any(n.get('source')=='correction' for n in graph['nodes'])
+        graph=c.get('/api/research/p001/pmtt').json()
+        assert set(graph)=={'nodes','edges'}
+        assert not any(n.get('source')=='correction' for n in graph['nodes'])
+        assert any(n.get('source')=='correction' for n in app.state.research.pmtt('p001')['nodes'])
         assert c.get('/research/bad.name').status_code==422
 
 

@@ -205,7 +205,7 @@ class ContextEngine:
         return result
 
     def snapshot(self, p, at, rows=None, *, include_details=True):
-        """Keep reviews/history on the context endpoint; omit them for insights."""
+        """Project context display details; omit reviews/history for insights."""
         at = dt(at)
         rows = self.store.rows(p) if rows is None else rows
         result = summary(rows, at)
@@ -222,14 +222,25 @@ class ContextEngine:
                 for key, node in nodes.items()
             ]
         if include_details:
-            result["reviews"] = [
+            reviews = [
                 r["payload"] for r in rows if r["kind"] == "context_review"
             ][:7]
+            # The context page uses day/created_at/episodes, never original_live.
+            # Copy the record so stored and caller-supplied payloads stay intact.
+            result["reviews"] = [
+                {key: value for key, value in review.items() if key != "original_live"}
+                for review in reviews
+            ]
         history = [
             r["payload"] for r in reversed(rows) if r["kind"] == "context_inference"
         ][-288:]
         if include_details:
-            result["history"] = history
+            # The history table reads at/place/task and no model report fields.
+            # Preserve the model key when present, with an empty projection.
+            result["history"] = [
+                {key: {} if key == "model" else value for key, value in item.items()}
+                for item in history
+            ]
         result["edges"] = transitions(history)
         path = self.directory(p) / "status.json"
         result["training"] = (

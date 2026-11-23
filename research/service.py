@@ -1,5 +1,6 @@
 """API integration; runs on Mac without torch, on Ubuntu with optional ML worker."""
 import asyncio
+from collections import Counter
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import json
@@ -111,6 +112,22 @@ def ingest_page(store,page):
                 cols=('participant','id','payload') if table=='devices' else ('participant','id','name')
                 store.db.execute(f'INSERT OR REPLACE INTO {table} VALUES(?,?,?)',tuple(r[c] for c in cols))
     return inserted
+
+
+def pmtt_projection(graph):
+    """Keep nodes with full-graph degree >= 2 and edges between them for display."""
+    degree = Counter()
+    for edge in graph["edges"]:
+        degree[edge["source"]] += 1
+        degree[edge["target"]] += 1
+    # Compute degrees once: retained nodes may have degree <= 1 after projection.
+    nodes = [node for node in graph["nodes"] if degree[node["id"]] >= 2]
+    retained = {node["id"] for node in nodes}
+    edges = [
+        edge for edge in graph["edges"]
+        if edge["source"] in retained and edge["target"] in retained
+    ]
+    return dict(nodes=nodes, edges=edges)
 
 
 class Engine:
@@ -391,7 +408,9 @@ def install(app,store,config):
     async def pmtt(participant:str,data_mode_:str=Query('real',alias='data_mode')):
         p=identifier(participant);data_mode_=mode(data_mode_)
         forwarded=await proxy(f'/api/research/{p}/pmtt?data_mode={data_mode_}')
-        return forwarded or engine.pmtt(p,data_mode_)
+        # The upstream API already projects its full graph; do not prune twice.
+        if forwarded:return forwarded
+        return pmtt_projection(engine.pmtt(p,data_mode_))
 
     @app.post('/api/research/{participant}/train')
     async def train_model(participant:str,payload:TrainRequest):
