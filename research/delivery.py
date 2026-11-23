@@ -13,7 +13,7 @@ import os
 from uuid import uuid4
 
 import numpy as np
-from .data import SCALES, Timeline, dt
+from .data import SCALES, Timeline, dt, training_examples
 from .experiment_metrics import sequential_baselines
 from .io import atomic_json
 from .questions import settings
@@ -207,14 +207,15 @@ def validation_evidence(engine, participant, mode, rows, at):
     if saved.get("version") != FEATURE_VERSION or saved.get("features") != FEATURES:
         evidence["reason"] = "incompatible_checkpoint"
         return evidence
-    timeline = Timeline(rows, text_model=engine.config.get("text_model") or active_report.get("text_model"))
+    timelines, all_examples = training_examples(rows, text_model=engine.config.get("text_model") or active_report.get("text_model"))
+    timeline = next(iter(timelines.values()), Timeline([]))
     identity = timeline.encoder.identity if timeline.encoder else "character-ngram-v1"
     if identity != active_report.get("text_identity", identity):
         evidence["reason"] = "text_encoder_changed"
         return evidence
     specs = {(s["id"], dt(s["at"]), dt(s["available"])) for s in split["validation"]}
     trained_ids = {s["id"] for s in active_splits.get("train", [])}
-    examples = [(l, sample) for l, sample in timeline.examples()
+    examples = [(l, sample) for l, sample in all_examples
                 if l.scope in SCOPES and (l.id, l.at, l.available) in specs
                 and l.available < at and l.id not in trained_ids]
     model = HierarchicalLSTM(**saved["settings"])
@@ -224,7 +225,7 @@ def validation_evidence(engine, participant, mode, rows, at):
     with torch.no_grad():
         for label, sample in examples:
             prediction = model(batch([sample], "cpu", mean, std))[label.scope][0].numpy()
-            baselines = sequential_baselines(timeline.labels, label.at, label.scope)
+            baselines = sequential_baselines(sample.timeline.labels, label.at, label.scope)
             for i, name in enumerate(SCALES):
                 baseline = baselines[name]
                 if not np.isfinite(label.values[i]) or not baseline["n"]:

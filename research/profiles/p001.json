@@ -1,0 +1,56 @@
+{
+  "schema_version": "aggregate-tendencies-v1",
+  "profile_version": "p001-aggregates-2026-11-24",
+  "participant_id": "p001",
+  "measured": {
+    "baseline_method": "condition-weighted daily mean; sd floor 0.5",
+    "scales": {
+      "mood": {"mean": 3.93, "sd": 0.86},
+      "fatigue": {"mean": 1.82, "sd": 0.91},
+      "stress": {"mean": 1.14, "sd": 0.50},
+      "concentration": {"mean": 3.64, "sd": 0.69},
+      "sleepiness": {"mean": 1.36, "sd": 0.52}
+    },
+    "answers_per_day": 1.65,
+    "scope_ratio": {"current": 12, "daily": 8},
+    "answer_time_peaks": ["22:00", "01:00", "09:00-11:00"],
+    "weather_probabilities": {"happy": 0.7333333333333333, "normal": 0.13333333333333333, "sad": 0.06666666666666667, "angry": 0.06666666666666667},
+    "calendar": {
+      "lab_weekday": 1,
+      "work_weekday_weights": {"0": 3, "1": 6, "2": 4, "3": 2},
+      "scheduled_day_ratio": 0.7586206896551724,
+      "block_median_hours": 3,
+      "start_hours": [8, 9, 10, 16, 19]
+    },
+    "topology": {
+      "states": 5,
+      "dominant_states": 1,
+      "feature_ranges": {"input": [0.39, 0.55], "corrections": [0.01, 0.05], "pauses": [0.05, 0.15]}
+    }
+  },
+  "assumed": {
+    "start_date": "2026-09-28",
+    "rho": 0.45,
+    "factor_loadings": {
+      "mood": [0.60, -0.10, -0.35],
+      "fatigue": [-0.35, 0.60, 0.15],
+      "stress": [-0.10, 0.05, 0.65],
+      "concentration": [0.50, -0.35, -0.30],
+      "sleepiness": [-0.15, 0.70, 0.05]
+    },
+    "noise_sd": 0.75,
+    "recall_noise_sd": 0.80,
+    "work_effect": [-0.10, 0.10, 0.20],
+    "lab_effect": [0.15, 0.10, 0.20],
+    "intraday_effect": [-0.10, 0.25, 0.05],
+    "no_answer_probability": 0.25,
+    "completion_probability": 0.90,
+    "time_mixture": [0.45, 0.35, 0.20],
+    "time_jitter_minutes": 40,
+    "state_weights": [0.60, 0.12, 0.10, 0.10, 0.08],
+    "dwell_median_minutes": 150,
+    "steps_per_state_hour": [100, 120, 180, 900, 350],
+    "anomaly_probability": 0.03,
+    "switchbot_enabled": false
+  }
+}

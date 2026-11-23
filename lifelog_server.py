@@ -25,6 +25,11 @@ DEFAULTS = {
     "allowed_clients": ["127.0.0.1", "::1"],
     "database": "data/lifelog.sqlite3", "ble_enabled": True,
     "stale_seconds": 120, "devices": {},
+    "research_personalized_sample_enabled": False,
+    "research_sample_auto_regenerate": False,
+    "research_sample_context_preview_enabled": False,
+    "research_real_sample_overlay_enabled": False,
+    "research_training_modes": ["real"],
 }
 ACTIVITIES = dict(zip(
     "desk_work meeting study cooking cleaning laundry shopping meal bath toilet dressing relax nap sleep_prep video game reading sns walk commute errand family friends call".split(),

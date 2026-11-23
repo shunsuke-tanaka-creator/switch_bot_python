@@ -34,7 +34,14 @@ def participants_for_mode(participant, mode, sample_participant=DEFAULT_SAMPLE_P
     return tuple(dict.fromkeys((participant, sample_participant)))
 
 
+def resolved_sample_participant(store, participant, fallback=DEFAULT_SAMPLE_PARTICIPANT):
+    from .sample_registry import active_generation
+    return active_generation(store, participant, fallback)
+
+
 def rows_for_mode(store, participant, mode="real", sample_participant=DEFAULT_SAMPLE_PARTICIPANT):
+    if mode != "real":
+        sample_participant = resolved_sample_participant(store, participant, sample_participant)
     rows = []
     for source in participants_for_mode(participant, mode, sample_participant):
         rows.extend(store.rows(source))
@@ -64,8 +71,11 @@ def source_identity(
     mode="real",
     sample_participant=DEFAULT_SAMPLE_PARTICIPANT,
     sample_manifest=None,
+    resolve_active=True,
 ):
     mode = data_mode(mode)
+    if mode != "real" and resolve_active:
+        sample_participant = resolved_sample_participant(store, participant, sample_participant)
     sources = participants_for_mode(participant, mode, sample_participant)
     maximum = {}
     content = {}
@@ -74,6 +84,12 @@ def source_identity(
         content[source] = hashlib.sha256(json.dumps([(r['id'],r['kind'],r['at'],r['payload']) for r in rows],sort_keys=True).encode()).hexdigest()
         maximum[source] = max((int(r.get("seq", 0)) for r in rows), default=0)
     manifest_hash = file_hash(sample_manifest) if sample_participant in sources and sample_manifest else None
+    if mode != "real":
+        from .sample_registry import generation
+        from .tendency_profile import canonical_hash
+        info = generation(store, sample_participant)
+        if info and not info["manifest"].get("legacy"):
+            manifest_hash = canonical_hash(info["manifest"])
     value = {
         "data_mode": mode,
         "source_max_seq": maximum,
@@ -84,3 +100,16 @@ def source_identity(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return value
+
+
+def mode_snapshot(store, participant, mode="real", sample_participant=DEFAULT_SAMPLE_PARTICIPANT,
+                  sample_manifest=None):
+    """Pin one immutable selection for training rows and checkpoint provenance."""
+    mode = data_mode(mode)
+    with store.lock:
+        selected = (resolved_sample_participant(store, participant, sample_participant)
+                    if mode != "real" else sample_participant)
+        rows = [r for source in participants_for_mode(participant, mode, selected) for r in store.rows(source)]
+        rows.sort(key=lambda r: (dt(r["at"]), r.get("seq", 0), r["participant"], r["id"]), reverse=True)
+        identity = source_identity(store, participant, mode, selected, sample_manifest, resolve_active=False)
+        return rows, identity

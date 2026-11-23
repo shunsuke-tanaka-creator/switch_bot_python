@@ -1,13 +1,19 @@
 """State inference from a compatible checkpoint; no training or HTTP side effects."""
 from datetime import datetime, timezone
-from .data import Timeline, dt, ACTIVITIES, SCALES
+from .data import Timeline, dt, ACTIVITIES, SCALES, inference_rows
 from .data_modes import data_mode
 
 
 def infer_state(engine,p,at=None,data_mode_='real'):
     data_mode_=data_mode(data_mode_)
-    at=dt(at or datetime.now(timezone.utc));rows=engine.rows(p,data_mode_)
+    at=(engine.preview_at(p,data_mode_,at) if hasattr(engine,'preview_at')
+        else dt(at or datetime.now(timezone.utc)))
+    rows=engine.rows(p,data_mode_)
+    rows,source=inference_rows(rows,at,p)
     response=_infer_lstm(engine,p,at,data_mode_,rows)
+    if data_mode_!='real':
+        response['sensor_source']=source
+        response['preview_support']=True
     from .delivery import apply_delivery
     response=apply_delivery(engine,p,at,data_mode_,rows,response)
     if response.get('current') is not None:
@@ -28,6 +34,11 @@ def _infer_lstm(engine,p,at,data_mode_,rows):
     from .data import VERSION, FEATURES
     from .delivery import read_checkpoint
     state,response['model_id']=read_checkpoint(checkpoint)
+    if data_mode_!='real':
+        from .data_modes import source_identity
+        identity=source_identity(engine.store,p,data_mode_,engine.sample_participant,engine.sample_manifest)
+        if state['report'].get('sample_manifest_hash')!=identity['sample_manifest_hash']:
+            response['status']='generation_changed';return response
     if state.get('version')!=VERSION or state.get('features')!=FEATURES:
         response['status']='incompatible_checkpoint';return response
     timeline=Timeline(rows,text_model=engine.config.get('text_model') or state['report'].get('text_model'))

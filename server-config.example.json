@@ -11,6 +11,10 @@
   "stale_seconds": 120,
   "devices": {},
   "research_enabled": false,
+  "research_personalized_sample_enabled": false,
+  "research_sample_auto_regenerate": false,
+  "research_sample_context_preview_enabled": false,
+  "research_real_sample_overlay_enabled": false,
   "research_models": "data/models",
   "research_training_modes": [
     "real"

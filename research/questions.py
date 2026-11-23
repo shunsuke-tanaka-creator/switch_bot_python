@@ -651,6 +651,9 @@ class QuestionQueue:
             return result(q)
 
     def pending(self, p, at):
+        from .sample_registry import is_sample_participant
+        if is_sample_participant(p):
+            return None
         at = dt(at)
         with self.store.lock:
             rows = self.store.rows(p)

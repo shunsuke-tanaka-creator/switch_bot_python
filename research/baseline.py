@@ -22,7 +22,10 @@ def period(t):
 def current_answers(rows, at):
     """One last available report per cutoff, so a correction is not a second vote."""
     result = {}
-    for l in sorted(Timeline(rows).labels, key=lambda x: x.available):
+    # Label activity comes from narratives/corrections; sensor events cannot
+    # affect this comparison. Avoid reconstructing all typing events per query.
+    label_rows = [r for r in rows if r["kind"] in ("narrative", "correction")]
+    for l in sorted(Timeline(label_rows).labels, key=lambda x: x.available):
         if l.scope == "current" and l.available < at and l.at < at:
             result[l.at] = l
     return list(result.values())

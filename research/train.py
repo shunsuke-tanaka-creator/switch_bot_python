@@ -8,8 +8,8 @@ import os
 import random
 import numpy as np
 import torch
-from .data import F, BASE, FEATURES, VERSION, SCALES, Timeline, materialize
-from .evaluation import online_updates
+from .data import F, BASE, FEATURES, VERSION, SCALES, Timeline, materialize, training_examples
+from .evaluation import online_updates, chronological_split, baseline_metrics
 from .model import HierarchicalLSTM
 
 
@@ -84,8 +84,8 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
                                           sample_manifest_hash=sample_manifest_hash)
         random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
         torch.set_num_threads(min(4,os.cpu_count() or 1))
-        timeline=Timeline(rows,text_model=text_model)
-        examples=timeline.examples()
+        timelines,examples=training_examples(rows,text_model)
+        timeline=next(iter(timelines.values()),Timeline([],text_model=text_model))
         state=[e for e in examples if e[0].scope in ('current','daily')]
         dates=sorted({l.at.date() for l,_ in state})
         if len(state)<min_labels or len(dates)<5:
@@ -93,12 +93,7 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
                         data_mode=data_mode,contains_sample=contains_sample,fingerprint=source_fingerprint,
                         source_max_seq=source_max_seq or {},sample_manifest_hash=sample_manifest_hash)
             atomic_json(directory/'status.json',result);return result
-        a=max(1,int(len(dates)*0.6));b=max(a+1,int(len(dates)*0.8))
-        train_end=dates[a];test_start=dates[min(b,len(dates)-1)]
-        # Labels answered later than a split boundary cannot train an earlier model.
-        tr=[e for e in examples if e[0].at.date()<train_end and e[0].available.date()<train_end]
-        va=[e for e in examples if train_end<=e[0].at.date()<test_start and e[0].available.date()<test_start]
-        te=[e for e in examples if e[0].at.date()>=test_start]
+        tr,va,te,train_end,test_start=chronological_split(examples)
         if not tr or not va:
             result=dict(status='insufficient_split',data_mode=data_mode,contains_sample=contains_sample,fingerprint=source_fingerprint,
                         source_max_seq=source_max_seq or {},sample_manifest_hash=sample_manifest_hash)
@@ -144,6 +139,17 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
                     limitations=['Research estimate, not a diagnosis','Door opening does not establish occupancy',('Frozen local sentence encoder' if text_model else 'Character n-gram text features; no pretrained language encoder'),'Historical reception times are not known for legacy imports'])
         from .text import text_metadata
         report['text_encoder'] = text_metadata(timeline.encoder)
+        report['support_by_source'] = {
+            source: {scope: {name: dict(
+                train=int(sum(l.source==source and l.scope==scope and np.isfinite(l.values[i]) for l,_ in tr)),
+                validation=int(sum(l.source==source and l.scope==scope and np.isfinite(l.values[i]) for l,_ in va)))
+                for i,name in enumerate(SCALES)} for scope in ('current','daily')}
+            for source in timelines}
+        report['validation_by_source'] = {source: metrics(model,[e for e in va if e[0].source==source],device,mean,std)
+                                          for source in timelines}
+        report['validation_baselines_by_source'] = baseline_metrics(va)
+        if contains_sample and best_mae < .15:
+            report['limitations'].append('Validation MAE < 0.15: check leakage/noise with shuffled-label control')
         report['run'] = run_metadata(seed, epochs, dict(model.settings, optimizer='AdamW', lr=.001, weight_decay=.001, batch_size=4, feature_version=VERSION),
                                     {name:[dict(id=l.id,at=l.at.isoformat(),available=l.available.isoformat()) for l,_ in items] for name,items in [('train',tr),('validation',va),('test',te)]})
         atomic_json(directory/'run.json', report['run'])
@@ -153,7 +159,9 @@ def train(rows, directory, variant='full', use_text=True, adaptation=True, epoch
         active=directory/'active.pt';promote=True
         if active.exists():
             old=torch.load(active,map_location=device,weights_only=True)
-            if old['settings']==model.settings and old.get('version')==VERSION and old['report'].get('text_identity')==report['text_identity']:
+            if (old['settings']==model.settings and old.get('version')==VERSION
+                    and old['report'].get('text_identity')==report['text_identity']
+                    and (data_mode=='real' or old['report'].get('sample_manifest_hash')==sample_manifest_hash)):
                 prior=HierarchicalLSTM(**old['settings']).to(device);prior.load_state_dict(old['weights'])
                 prior_score=metrics(prior,va,device,torch.tensor(old['mean'],device=device),torch.tensor(old['std'],device=device))['mean_mae']
                 promote=prior_score is None or best_mae<=prior_score
@@ -186,7 +194,7 @@ def personalization_evaluation(rows, directory, epochs=20, hidden=48, text_model
     frozen=HierarchicalLSTM(**state['settings']);frozen.load_state_dict(state['weights']);frozen.eval()
     adapted=copy.deepcopy(frozen)
     optimizer=torch.optim.AdamW(adapted.parameters(),lr=.0001)
-    examples=Timeline(rows,text_model=text_model).examples()
+    _,examples=training_examples(rows,text_model)
     test=[e for e in examples if str(e[0].at.date())>=report['test_from'] and e[0].scope in ('current','daily')]
     mean=torch.tensor(state['mean']);std=torch.tensor(state['std'])
     totals={name:{scope:np.zeros(5) for scope in ('current','daily')} for name in ('frozen','updated')}

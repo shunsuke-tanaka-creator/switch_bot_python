@@ -4,16 +4,27 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from urllib.parse import urlparse
-import httpx
-from lifelog_server import Store
-from .service import export_page, ingest_page, identifier
+from lifelog.store import Store
 from .data import dt
 from .data_modes import DATA_MODES, DEFAULT_SAMPLE_PARTICIPANT, rows_for_mode, source_identity
 
 
+def identifier(participant):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', participant):
+        raise ValueError('Invalid participant')
+    return participant
+
+
+def ingest_page(store, page):
+    from .service import ingest_page as action
+    return action(store, page)
+
+
 def export_all(store, participant, path):
+    from .service import export_page
     # Single SQLite read transaction represented as one page: includes every record and device metadata.
     with store.lock:
         page=export_page(store,participant,limit=2**31-1)
@@ -45,6 +56,7 @@ def import_file(store,path,participant):
 
 
 def sync(store,source,participant,state_path,client=None):
+    import httpx
     # Persist cursor only after inserts commit. Retry is idempotent using original record IDs.
     from .io import atomic_json
     if urlparse(source).scheme not in ('http','https'):raise ValueError('HTTP(S) source required')
@@ -89,8 +101,18 @@ def main():
     context=sub.add_parser('context-train');context.add_argument('--models',default='data/models');context.add_argument('--epochs',type=int,default=12)
     add_text_arguments(context)
     context.add_argument('--device',choices=['auto','cpu','cuda','mps'],default='auto');context.add_argument('--evaluate-test',action='store_true');context.add_argument('--force',action='store_true')
-    sample=sub.add_parser('generate-sample');sample.add_argument('--calendar',required=True);sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
+    sample=sub.add_parser('generate-sample')
+    inputs=sample.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--calendar');inputs.add_argument('--tendencies')
+    sample.add_argument('--sample-participant',default=DEFAULT_SAMPLE_PARTICIPANT)
     sample.add_argument('--manifest',default=None);sample.add_argument('--dry-run',action='store_true');sample.add_argument('--include-today',action='store_true')
+    sample.add_argument('--weeks',type=int,default=8);sample.add_argument('--seed',type=int,default=17)
+    from .personalized_sample import SCENARIOS
+    sample.add_argument('--scenario',choices=SCENARIOS,default='personalized')
+    sample.add_argument('--require-gates',action='store_true')
+    for name in ('validate-sample','activate-sample'):
+        command=sub.add_parser(name);command.add_argument('--generation',required=True)
+        if name=='validate-sample':command.add_argument('--training-report')
     args=p.parse_args();identifier(args.participant)
     if args.command=='experiment':
         from .experiment_cli import run
@@ -98,7 +120,8 @@ def main():
     if args.command=='generate-sample' and args.dry_run:
         from .sample_data import generate_sample
         result=generate_sample(args.calendar,args.sample_participant,args.participant,manifest_path=args.manifest,
-                               dry_run=True,include_today=args.include_today)
+                               dry_run=True,include_today=args.include_today,tendencies=args.tendencies,
+                               weeks=args.weeks,seed=args.seed,scenario=args.scenario,require_gates=args.require_gates)
         print(json.dumps(result,ensure_ascii=False,allow_nan=False));return
     store=Store(args.db)
     try:
@@ -123,14 +146,22 @@ def main():
         elif args.command=='generate-sample':
             from .sample_data import generate_sample
             result=generate_sample(args.calendar,args.sample_participant,args.participant,store=store,manifest_path=args.manifest,
-                                   include_today=args.include_today)
+                                   include_today=args.include_today,tendencies=args.tendencies,
+                                   weeks=args.weeks,seed=args.seed,scenario=args.scenario,require_gates=args.require_gates)
+        elif args.command=='validate-sample':
+            from .sample_validation import validate_sample
+            report=json.loads(Path(args.training_report).read_text()) if args.training_report else None
+            result=validate_sample(store,args.generation,report)
+        elif args.command=='activate-sample':
+            from .sample_registry import activate_sample
+            result=activate_sample(store,args.participant,args.generation)
         else:
             from .train import train,ablations,personalization_evaluation
             action={'compare':ablations,'train':train,'personalize':personalization_evaluation}[args.command]
             manifest=args.sample_manifest or f'data/sample/{args.sample_participant}/manifest.json'
-            rows=rows_for_mode(store,args.participant,args.data_mode,args.sample_participant)
+            from .data_modes import mode_snapshot
+            rows,identity=mode_snapshot(store,args.participant,args.data_mode,args.sample_participant,manifest)
             directory=Path(args.models)/args.participant/args.data_mode
-            identity=source_identity(store,args.participant,args.data_mode,args.sample_participant,manifest)
             metadata=dict(data_mode=args.data_mode,contains_sample=args.data_mode!='real' or args.participant==args.sample_participant,
                           source_fingerprint=identity['fingerprint'],source_max_seq=identity['source_max_seq'],
                           sample_manifest_hash=identity['sample_manifest_hash'])
