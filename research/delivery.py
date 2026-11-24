@@ -143,7 +143,7 @@ def apply_delivery(engine, participant, at, mode, rows, response):
             item.update(source="lstm", provisional=False, baseline_method=None)
     if not enabled(engine, participant, at):
         return response
-    labels = Timeline(rows).labels
+    labels = Timeline([r for r in rows if r["kind"] in ("narrative", "correction")]).labels
     state = load_state(engine.directory(participant, mode))
     answered = answered_predictions(engine.store.rows(participant), labels, at, mode)
     model_id = response.get("model_id")

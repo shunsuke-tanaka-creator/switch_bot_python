@@ -3,6 +3,8 @@ from datetime import timedelta
 import json
 from types import SimpleNamespace
 
+import pytest  # 追加: API履歴の回帰テストをreal/sampleで実行する。
+
 from lifelog.store import Store
 from research.data import dt, SCALES, Timeline
 from research.data_modes import is_training_row
@@ -242,4 +244,70 @@ def test_audit_worker_records_once_per_bucket_without_issuing():
     assert len(logs)==1 and logs[0]["payload"]["eligible"]
     assert logs[0]["payload"]["delivery_mode"]=="shadow"
     assert not any(r["kind"]=="question_issued" for r in store.rows(P))
+    store.close()
+
+
+# 追加: APIでも質問履歴を保持し、snapshot後の追加を次の応答で順位へ反映する。
+@pytest.mark.parametrize("mode", ["real", "sample"])
+def test_api_actions_keep_question_history_and_snapshot_consistency(tmp_path, monkeypatch, mode):
+    from fastapi.testclient import TestClient
+    from lifelog_server import create_app
+
+    store = Store(tmp_path / "support.sqlite3")
+    owner = P if mode == "real" else P + "-sample"
+    for r in records(mode=mode):
+        store.save(r["kind"], r["id"], owner, dt(r["at"]), r["payload"])
+    recent = AT - timedelta(minutes=1)
+    store.save("session", "fresh", owner, recent, dict(
+        started_at=recent.isoformat(), ended_at=recent.isoformat(), events=[]))
+    app = create_app(dict(ble_enabled=False, allowed_clients=["testclient"],
+                          research_models=str(tmp_path / "models"),
+                          research_architecture="discovery"), store)
+    engine = app.state.research
+    mapping = SimpleNamespace(to_dict=lambda: dict(nodes=[], edges=[], overflow=0))
+    loaded = (dict(report=dict(experiment_id="m1", trained_through=(AT-BUCKET).isoformat())),
+              None, dict(behavior=mapping))
+    monkeypatch.setattr(engine.discovery, "load", lambda *args: loaded)
+    monkeypatch.setattr(engine, "preview_at", lambda *args: AT)
+    monkeypatch.setattr(engine, "infer", lambda *args: None)
+    monkeypatch.setattr(engine, "context_snapshot", lambda *args, **kwargs: {})
+    monkeypatch.setattr("research.discovery_support.preview_sample_rows",
+                        lambda runtime, p, rows, at: rows)
+    path = f"/api/research/{P}/insights?data_mode={mode}"
+    with TestClient(app) as client:
+        first = client.get(path)
+        assert first.status_code == 200
+        before = first.json()["support"]
+        assert before["eligible"] and before["delivery_mode"] == "shadow"
+        assert before["actions"][0]["action"] == "short_break"
+        store.save("research_event", "usefulness", owner, recent, dict(
+            kind="intervention_outcome", payload=dict(question_id="offer",
+                action="refresh", executed=True, helpfulness="helpful")))
+        assert client.get(path).json()["support"]["actions"] == before["actions"]
+        trend_cache = dict(engine.insights.trend_cache)
+        old_rows = engine.api_cache.records(owner).rows
+        original = engine.api_cache._source
+        appended = False
+
+        def append_after_snapshot(participant):
+            nonlocal appended
+            source = original(participant)
+            if participant == owner and not appended:
+                appended = True
+                store.save("question_issued", "offer", owner, recent,
+                           dict(kind="breakCheck", eventType=BREAK+"previous"))
+            return source
+
+        monkeypatch.setattr(engine.api_cache, "_source", append_after_snapshot)
+        assert client.get(path).json()["support"]["actions"] == before["actions"]
+        after = client.get(path).json()["support"]
+        assert appended and after["actions"] == rank_actions(store.rows(owner), AT, before)
+        assert after["actions"][0]["action"] == "refresh"
+        scores = {a["action"]: a["score"] for a in before["actions"]}
+        assert after["actions"][0]["score"] == pytest.approx(scores["refresh"] + 0.15)
+        current_rows = engine.api_cache.records(owner).rows
+        assert all(any(r is old for r in current_rows) for old in old_rows)
+        assert engine.insights.trend_cache == trend_cache
+        engine.api_cache.enabled = False
+        assert client.get(path).json()["support"]["actions"] == after["actions"]
     store.close()

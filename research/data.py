@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from functools import lru_cache
 from collections.abc import Mapping
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 import math
@@ -130,6 +130,8 @@ class Timeline:
             label.source = sources.get(label.id, sources.get(label.id.removesuffix(':activity'), ''))
         self.features = lru_cache(maxsize=12000)(self.features)
         self.labels.sort(key=lambda l: l.at)
+        self.activity_labels = [l for l in self.labels if l.scope == 'activity']
+        self.activity_times = [l.at for l in self.activity_labels]
         self.event_times = [e[0] for e in self.events]
         for l in self.labels:
             if l.scope in ('current','daily'): l.activity = self.activity_at(l.at)
@@ -158,8 +160,16 @@ class Timeline:
         for available, p in reversed(self.corrections):
             if available <= at and dt(p['start']) <= at < dt(p['end']) and p.get('activity') in ACTIVITIES:
                 return ACTIVITIES.index(p['activity'])
-        prior = [l for l in self.labels if l.scope == 'activity' and l.available <= at and 0 <= (at-l.at).total_seconds() <= 1800]
-        return prior[-1].activity if prior else -1
+        # The same lookup runs once per state label during initialization. Search
+        # only the 30-minute activity interval, preserving last-label precedence
+        # and the independent reception cutoff for delayed answers.
+        first = bisect_left(self.activity_times, at - timedelta(seconds=1800))
+        last = bisect_right(self.activity_times, at)
+        for index in range(last - 1, first - 1, -1):
+            label = self.activity_labels[index]
+            if label.available <= at:
+                return label.activity
+        return -1
 
     def visible_events(self, available_at):
         """Index one causal reception snapshot for all bins of a lazy sample."""
