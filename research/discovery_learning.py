@@ -28,7 +28,8 @@ def source_rows(rows, at=None):
     for original in (available_rows(rows, dt(at)) if at is not None else rows):
         row = copy.deepcopy(original)
         kind, payload = row["kind"], row["payload"]
-        if kind == "narrative" and payload.get("question", {}).get("kind") not in ("currentState", "nightReflection"):
+        if kind == "narrative" and (payload.get("question", {}).get("kind") not in ("currentState", "nightReflection")
+                                     or str(payload.get("event_type", "")).startswith(("support_pre:", "support_post:"))):
             continue
         if kind == "correction":
             if not payload.get("scores"):
