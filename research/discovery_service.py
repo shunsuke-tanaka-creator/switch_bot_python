@@ -228,6 +228,29 @@ class DiscoveryInsights:
     def __init__(self,runtime):
         self.runtime=runtime
         self.trend_cache={}
+        from .discovery_support import support_mode, settings
+        self.support_mode=support_mode(runtime.config)
+        settings(runtime.config)
+
+    def record_support(self, p, at, prediction):
+        """Worker-only real-data audit, once per completed five-minute bucket."""
+        from .discovery_support import bucket, BUCKET, decision_with_actions, effects
+        from .sample_registry import is_sample_participant
+        if self.support_mode == "off" or is_sample_participant(p):
+            return
+        if prediction.get("data_mode") != "real" or prediction.get("contains_sample", True):
+            return
+        at=dt(at)
+        key=(bucket(at)-BUCKET).isoformat()
+        store=self.runtime.store
+        rows=store.rows(p)
+        if any(r["kind"]=="support_decision" and r["id"]==key for r in rows):
+            return
+        active=prediction.get("model_id") if prediction.get("status")=="ready" else None
+        decision=decision_with_actions(rows, at, "real", self.runtime.config, active)
+        store.save("support_decision", key, p, at, dict(decision, evaluated_at=at.isoformat()))
+        for offer, effect in effects(rows, at):
+            store.save("support_effect", offer, p, at, effect)
 
     def snapshot(self,p,at,prediction=None,rows=None,data_mode="real"):
         from .baseline import conditional, weekday_trends
@@ -251,7 +274,17 @@ class DiscoveryInsights:
                             status="confirmed" if n["confirmed"] else "emerging") for n in mapping["nodes"]],
                 edges=mapping["edges"],status="training_map",at_capacity=mapping["overflow"]>0,
                 model_id=loaded[0]["report"]["experiment_id"])
+        from .discovery_support import decision_with_actions, preview_sample_rows
+        support_rows=rows
+        if data_mode=="sample" and loaded and self.support_mode!="off":
+            support_rows=preview_sample_rows(self.runtime,p,rows,at)
+        active=loaded[0]["report"]["experiment_id"] if loaded else None
+        if data_mode=="real" and not fresh(observations(source),at):
+            active=None
+        support=decision_with_actions(support_rows,at,data_mode,self.runtime.config,active)
+        support["retrospective_preview"] = data_mode=="sample"
         return dict(version=VERSION,architecture="discovery",at=at.isoformat(),patterns=patterns,
+                    support=support,
                     baseline=conditional(rows,at),trends=trends,
                     typing=typing_change(typing_windows(rows,at),at),
                     places=dict(nodes=[],edges=[],current=None,latest=None,
