@@ -16,6 +16,7 @@ ACTIONS = {"short_break": "短い休憩", "refresh": "軽い気分転換", "swit
 PRE = "support_pre:"
 BREAK = "support_discovery:"
 POST = "support_post:"
+OUTCOME = "support_outcome:"
 BUCKET = timedelta(minutes=5)
 
 
@@ -283,11 +284,17 @@ def _within(q, answer, at):
 
 
 def _execution(rows, qid, action, accepted_at):
+    question = next((r for r in rows if r["kind"] == "question_issued"
+                     and r["payload"].get("eventType") == OUTCOME + qid
+                     and r["payload"].get("relatedID") == qid
+                     and dt(r["at"]) >= accepted_at), None)
+    if not question:
+        return None
     return next((r for r in reversed(rows) if r["kind"] == "research_event"
                  and r["payload"].get("kind") == "intervention_outcome"
                  and r["payload"]["payload"].get("question_id") == qid
                  and r["payload"]["payload"].get("action") == action
-                 and dt(r["at"]) >= accepted_at), None)
+                 and dt(question["at"]) <= dt(r["at"]) <= dt(question["payload"]["expiresAt"])), None)
 
 
 def followup(rows, at):
@@ -332,13 +339,13 @@ def followup(rows, at):
         return False, None
     outcome = _execution(rows, offer["id"], action, dt(answer["at"]))
     outcome_question = next((r for r in questions
-                             if r["payload"].get("eventType") == "outcome:" + offer["id"]), None)
+                             if r["payload"].get("eventType") == OUTCOME + offer["id"]), None)
     if not outcome:
         if outcome_question:
             return False, None
         if age < timedelta(minutes=15):
             return True, None
-        return True, dict(kind="supportOutcome", event="outcome:" + offer["id"], ttl=60,
+        return True, dict(kind="supportOutcome", event=OUTCOME + offer["id"], ttl=60,
                           related=offer["id"], prompt="先ほどの提案を実行しましたか？",
                           options=[("実行して役立った", f"outcome:{action}:helpful"),
                                    ("実行して変わらない", f"outcome:{action}:unchanged"),
@@ -396,7 +403,7 @@ def effects(rows, at):
 
 def linked_question(q, issued):
     event = q.get("eventType", "")
-    if event.startswith((PRE, BREAK, POST)):
+    if event.startswith((PRE, BREAK, POST, OUTCOME)):
         return True
     if event.startswith("outcome:"):
         return any(r["id"] == event.split(":", 1)[1]
