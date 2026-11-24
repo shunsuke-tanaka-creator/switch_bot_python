@@ -128,6 +128,17 @@ def weekday_trends(rows, at, min_weeks=6, min_target_days=4, min_reference_days=
             weeks = sorted(
                 {d - timedelta(days=d.weekday()) for d, _, _, _ in target + ref}
             )
+            # Reuse the fixed blocks instead of scanning all samples for every
+            # selected week in every draw. Keep block order unchanged so means,
+            # floating-point accumulation and the seeded bootstrap stay exact.
+            target_by_week = {week: [] for week in weeks}
+            reference_by_week = {week: [] for week in weeks}
+            for sample in target:
+                date = sample[0]
+                target_by_week[date - timedelta(days=date.weekday())].append(sample)
+            for sample in ref:
+                date = sample[0]
+                reference_by_week[date - timedelta(days=date.weekday())].append(sample)
             rng = np.random.default_rng(1700 + day)
             boot = []
             for _ in range(2000):
@@ -136,14 +147,8 @@ def weekday_trends(rows, at, min_weeks=6, min_target_days=4, min_reference_days=
                 r = []
                 for index in selected:
                     week = weeks[int(index)]
-                    t.extend(
-                        s
-                        for s in target
-                        if s[0] - timedelta(days=s[0].weekday()) == week
-                    )
-                    r.extend(
-                        s for s in ref if s[0] - timedelta(days=s[0].weekday()) == week
-                    )
+                    t.extend(target_by_week[week])
+                    r.extend(reference_by_week[week])
                 e = effect(t, r)
                 if e is not None:
                     boot.append(e)

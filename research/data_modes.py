@@ -65,6 +65,18 @@ def file_hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+def sample_manifest_identity(store, mode, sample_participant, sample_manifest=None):
+    """The manifest component of source_identity, without loading training rows."""
+    manifest_hash = file_hash(sample_manifest) if sample_manifest else None
+    if mode != "real":
+        from .sample_registry import generation
+        from .tendency_profile import canonical_hash
+        info = generation(store, sample_participant)
+        if info and not info["manifest"].get("legacy"):
+            manifest_hash = canonical_hash(info["manifest"])
+    return manifest_hash
+
+
 def source_identity(
     store,
     participant,
@@ -83,13 +95,8 @@ def source_identity(
         rows = [r for r in store.rows(source) if is_training_row(r)]
         content[source] = hashlib.sha256(json.dumps([(r['id'],r['kind'],r['at'],r['payload']) for r in rows],sort_keys=True).encode()).hexdigest()
         maximum[source] = max((int(r.get("seq", 0)) for r in rows), default=0)
-    manifest_hash = file_hash(sample_manifest) if sample_participant in sources and sample_manifest else None
-    if mode != "real":
-        from .sample_registry import generation
-        from .tendency_profile import canonical_hash
-        info = generation(store, sample_participant)
-        if info and not info["manifest"].get("legacy"):
-            manifest_hash = canonical_hash(info["manifest"])
+    manifest_hash = (sample_manifest_identity(store, mode, sample_participant, sample_manifest)
+                     if sample_participant in sources else None)
     value = {
         "data_mode": mode,
         "source_max_seq": maximum,

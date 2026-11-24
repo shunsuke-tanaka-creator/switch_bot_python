@@ -33,9 +33,9 @@ def typing_windows(rows, at, minutes=10):
     """Non-overlapping fixed JST windows; physical inserts and user deletions only."""
     events = {}
     meta = {}
-    for r in available_rows(rows, at):
-        if r["kind"] != "session":
-            continue
+    # Only sessions contribute windows. Avoid sorting/parsing the much larger
+    # heartbeat and sensor history just to discard it immediately afterward.
+    for r in available_rows((r for r in rows if r["kind"] == "session"), at):
         p = r["payload"]
         device = p.get("device_id", "legacy")
         for i, e in enumerate(p.get("events", [])):
@@ -245,7 +245,12 @@ class GrowingMap:
 def behavior_map(windows, at, radius=0.35, rows=()):
     """Behavior prototypes use typing features within exact place/action states."""
     # 追加: 永続化済みContext推定から、各窓を特徴づける場所・アクションを解決する。
-    visible = available_rows(rows, at)
+    # Context replay depends on these kinds only; unrelated observations cannot
+    # change names/aliases or the nearest context assignment.
+    visible = available_rows(
+        (r for r in rows if r["kind"] in ("context_inference", "context_candidate", "research_event")),
+        at,
+    )
     context_rows = [r for r in visible if r["kind"] == "context_inference"]
     context_times = [dt(r["at"]) for r in context_rows]
     from .context_data import catalog, resolve
