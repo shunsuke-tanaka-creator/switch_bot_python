@@ -70,14 +70,15 @@ def _predictions(rows, at, mode):
             continue
         p = r["payload"]
         if (p.get("architecture") != "discovery" or p.get("data_mode") != mode
-                or p.get("mode") != "live" or p.get("status") != "ready"
+                or p.get("mode") not in (("live", "review") if mode == "sample" else ("live",))
+                or p.get("status") != "ready"
                 or not p.get("model_id") or not p.get("current")
                 or (mode == "real" and p.get("contains_sample", True))):
             continue
         t = dt(p["at"])
         received = max(dt(r["at"]), dt(p.get("received_at", r["at"])),
                        dt(p.get("available_at", p["at"])))
-        if t <= received <= at:
+        if at - timedelta(days=56) <= t <= received <= at:
             result.append((t, received, p))
     return sorted(result, key=lambda item: (item[0], item[1]))
 
@@ -202,8 +203,8 @@ def evaluate(rows, at, mode="real", config=None):
     for s in SCALES_SUPPORT:
         shared = set(current[s]["flags"]) & set(previous[s]["flags"])
         # Avoid treating a change of Behavior-conditioned reference as persistence.
-        if key != prev_key and (current[s]["baseline"]["basis"] == "behavior"
-                                or previous[s]["baseline"]["basis"] == "behavior"):
+        if (key != prev_key or current[s]["baseline"]["basis"] != previous[s]["baseline"]["basis"]) and (
+                current[s]["baseline"]["basis"] == "behavior" or previous[s]["baseline"]["basis"] == "behavior"):
             shared.discard("relative")
         triggers.extend(dict(scale=s, reason=reason) for reason in sorted(shared))
     usable = any(v["value"] is not None and v["baseline"]["status"] == "available"
@@ -274,7 +275,10 @@ def _answers(rows):
 
 
 def _within(q, answer, at):
-    return bool(answer and dt(q["at"]) <= dt(answer["at"]) <= dt(q["payload"]["expiresAt"])
+    return bool(answer and q["payload"].get("expiresAt")
+                and answer["payload"].get("question", {}).get("kind") == q["payload"].get("kind")
+                and answer["payload"].get("event_type") == q["payload"].get("eventType")
+                and dt(q["at"]) <= dt(answer["at"]) <= dt(q["payload"]["expiresAt"])
                 and dt(answer["at"]) <= at)
 
 
@@ -319,7 +323,8 @@ def followup(rows, at):
     if offer["id"] in stopped or not _within(offer, answer, at):
         return False, None
     accepted = answer["payload"].get("answer", {}).get("label") or ""
-    if not accepted.startswith("accept:") or accepted[7:] not in ACTIONS:
+    if (not accepted.startswith("accept:") or accepted[7:] not in ACTIONS
+            or accepted not in {o["value"] for o in offer["payload"]["options"]}):
         return False, None
     action = accepted[7:]
     age = at - dt(answer["at"])
@@ -387,3 +392,40 @@ def effects(rows, at):
                                delta=delta, improvement=mean(signed) if len(signed) == len(SCALES) else None,
                                helpfulness=execution["payload"]["payload"].get("helpfulness"),
                                note="self_reported_change_not_causal_effect")
+
+
+def linked_question(q, issued):
+    event = q.get("eventType", "")
+    if event.startswith((PRE, BREAK, POST)):
+        return True
+    if event.startswith("outcome:"):
+        return any(r["id"] == event.split(":", 1)[1]
+                   and r["payload"].get("eventType", "").startswith(BREAK) for r in issued)
+    return False
+
+
+def decision_with_actions(rows, at, mode, config, active_model_id):
+    result = evaluate(rows, at, mode, config)
+    if result["eligible"] and result["model_id"] != active_model_id:
+        result.update(eligible=False, status="insufficient_data", reason="active_model_changed")
+    result["actions"] = rank_actions(rows, at, result) if result["eligible"] else []
+    result["delivery_mode"] = support_mode(config)
+    return result
+
+
+def preview_sample_rows(runtime, p, rows, at):
+    """Ephemeral retrospective replay on the sample model only; never persist."""
+    at = dt(at)
+    last = bucket(at) - BUCKET
+    result = list(rows)
+    for offset in (7, 6, 1, 0):
+        b = last - offset * BUCKET
+        t = b + BUCKET - timedelta(seconds=1)
+        if not any(r["kind"] in ("session", "switchbot", "switchbot_observation")
+                   and b <= dt(r["at"]) <= t
+                   and dt(r["payload"].get("received_at", r["at"])) <= t for r in rows):
+            continue
+        pred = runtime.infer(p, t, "sample", rows=rows, retrospective=True, available_at=t)
+        result.append(dict(kind="inference", id="sample-preview:" + b.isoformat(), at=t.isoformat(),
+                           payload=pred))
+    return result
