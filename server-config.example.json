@@ -11,6 +11,7 @@
   "stale_seconds": 120,
   "devices": {},
   "research_enabled": false,
+  "discovery_support_mode": "shadow",
   "research_personalized_sample_enabled": false,
   "research_sample_auto_regenerate": false,
   "research_sample_context_preview_enabled": false,
