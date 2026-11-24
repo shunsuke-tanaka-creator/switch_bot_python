@@ -164,32 +164,42 @@ class Engine:
                   if data_mode_!='real' else self.sample_participant)
         sources=participants_for_mode(p,data_mode_,selected)
         views=[self.api_cache.records(source,kinds) for source in sources]
-        if len(views)==1:return views[0]
+        return self._merge_views(p,data_mode_,kinds,dict(zip(sources,views)))
+
+    # 追加: 同一snapshotから取得したviewにも既存の結合キャッシュを共用する。
+    def _merge_views(self,p,data_mode_,kinds,views):
+        if len(views)==1:return next(iter(views.values()))
         from heapq import merge
-        signature=tuple((source,view.fingerprint) for source,view in zip(sources,views))
+        signature=tuple((source,view.fingerprint) for source,view in views.items())
         return self.api_cache.compute(
             ('rows',p,data_mode_,tuple(sorted(kinds)) if kinds is not None else None),
             signature,
-            lambda:RecordView(list(merge(*(v.rows for v in views),key=row_order,reverse=True)),signature),
+            lambda:RecordView(list(merge(*(v.rows for v in views.values()),key=row_order,reverse=True)),signature),
         )
 
     def rows(self,p,data_mode_='real'):
         # Snapshots are read-only; copy an individual payload before enriching it.
         return self.record_view(p,data_mode_).rows
 
-    def insight_snapshot(self,p,at,prediction,records,data_mode_):
+    def insight_snapshot(self,p,at,prediction,data_mode_):
         selected=(resolved_sample_participant(self.store,p,self.sample_participant)
                   if data_mode_!='real' else self.sample_participant)
         fingerprints={}
+        # 追加: combinedのheartbeatを維持し、履歴・検出器・回答を同じsnapshotから取り出す。
+        history_kinds=None if data_mode_=='combined' else INSIGHT_KINDS
+        histories={}
         kinds=('session','narrative','correction','research_event',
                'context_inference','step_snapshot','state_step_snapshot')
         for owner in participants_for_mode(p,data_mode_,selected):
-            view=self.api_cache.records(owner,kinds)
-            labels=self.api_cache.records(owner,('narrative','correction'))
+            history,view,labels=self.api_cache.record_views(
+                owner,(history_kinds,kinds,('narrative','correction')),
+            )
+            histories[owner]=history
             fingerprints[owner]=( (view.fingerprint,view.time_key(at)),
                                   (labels.fingerprint,labels.time_key(at)) )
         # Sample mode uses the requesting participant as its existing cache slot.
         if data_mode_=='sample':fingerprints[p]=fingerprints[selected]
+        records=self._merge_views(p,data_mode_,history_kinds,histories).rows
         return self.insights.snapshot(p,at,prediction,records,data_mode_,fingerprints=fingerprints)
 
     def file_revision(self,path):
@@ -451,13 +461,9 @@ def install(app,store,config):
         p=identifier(participant);data_mode_=mode(data_mode_)
         forwarded=await proxy(f'/api/research/{p}/insights?data_mode={data_mode_}')
         if forwarded:return forwarded
-        # Combined selection still needs heartbeat freshness; single-source
-        # insight detectors consume only the kinds listed here.
-        records=(engine.rows(p,data_mode_) if data_mode_=='combined'
-                 else engine.record_view(p,data_mode_,INSIGHT_KINDS).rows)
         at=engine.preview_at(p,data_mode_)
         prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,at,data_mode_)
-        result=await asyncio.to_thread(engine.insight_snapshot,p,at,prediction,records,data_mode_)
+        result=await asyncio.to_thread(engine.insight_snapshot,p,at,prediction,data_mode_)
         result['context']=await asyncio.to_thread(engine.context_snapshot,p,utc(),include_details=False) if data_mode_=='real' else dict(status='real_only')
         pref_view=engine.record_view(p,'real',('heartbeat','intervention_feedback','research_event'))
         result['preferences']=engine.api_cache.compute(('preferences',p),pref_view.fingerprint,
