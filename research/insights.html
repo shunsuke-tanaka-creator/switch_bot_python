@@ -136,18 +136,30 @@
           height: 260px;
         }
       }
-    </style>
+    
+      body { background:#f7f6f1; color:#243c37; line-height:1.65 }
+      main { max-width:1024px; padding:clamp(12px,3vw,32px); margin:auto }
+      .pages { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:24px; border-bottom:1px solid #cbd8d1 }
+      .pages a { padding:9px 12px; color:#32594c; text-decoration:none }
+      .pages [aria-current] { border-bottom:3px solid #176349; font-weight:700 }
+      h1 { font-size:clamp(26px,4vw,38px); line-height:1.3; margin:12px 0 }
+      section { border:1px solid #dce4dd; border-radius:16px; padding:clamp(14px,3vw,26px) }
+      section h2:first-child { margin-top:0 }
+      th { background:#f2f6f2 }
+      :focus-visible { outline:3px solid #237559; outline-offset:2px }
+      @media(max-width:560px){ .grid { grid-template-columns:minmax(0,1fr) } .pages a { padding:9px 6px;font-size:14px } }
+</style>
   </head>
   <body>
-    <main>
+    <main><nav class="pages" aria-label="研究画面"><a id="dashboardLink" href="/research/__PARTICIPANT__">今日の状態</a><a aria-current="page" href="/research/__PARTICIPANT__/insights">生活の気づき</a><a href="/research/__PARTICIPANT__/context">拠点とタスク（実記録）</a></nav>
       <h1>生活の気づき</h1>
       <p>気分の回答・観測・三階層LSTMの推定を区別して表示します。</p>
-      <p><a id="dashboardLink" href="/research/__PARTICIPANT__">5尺度の履歴・訂正・学習状況</a></p>
+      
       <label>データ
         <select id="dataMode">
           <option value="real">実データ</option>
-          <option value="sample">サンプルのみ</option>
-          <option value="combined">実＋サンプル</option>
+          <option value="sample">個人化サンプル</option>
+          <option value="combined">実記録とサンプル</option>
         </select>
       </label>
       <p id="sampleWarning" class="warning" hidden>
@@ -163,6 +175,7 @@
       </section>
       <section>
         <h2>質問と提案</h2>
+        <div id="breakPanel" class="notice" hidden><strong>休憩の目安</strong><p id="breakSummary"></p><small>疲労・集中度・眠気を5分ごとに見て、同じ変化が2区間続いたかを確認します。</small></div>
         <button id="answer">今の質問に回答</button
         ><button id="refresh">更新</button>
         <div>
@@ -207,7 +220,7 @@
         <h2>拠点とタスク</h2><p><a href="/research/__PARTICIPANT__/context">拠点・タスクの推定、命名・訂正、1日の振り返りを開く</a></p>
       </section>
       <section>
-        <h2>自動で増える生活パターン</h2>
+        <h2>記録から見えてきた生活パターン</h2>
         <p id="patternSummary"></p>
         <svg id="patterns" role="img" aria-label="生活パターンの遷移"></svg>
         <div class="scroll"><table id="patternRows"></table></div>
@@ -324,6 +337,16 @@
         try {
           const d = await request(api + "/insights?data_mode=" + dataMode);
           snapshot = d;
+          $("breakPanel").hidden = !d.support;
+          if (d.support) {
+            const support = d.support;
+            const result = support.status === "disabled" ? "休憩判定は停止中です。"
+              : support.data_mode === "combined" ? "実記録とサンプルを合わせた表示では判定を行いません。"
+              : support.eligible ? "休憩候補の条件に当てはまりました。"
+              : support.status === "available" ? "今回、休憩候補の条件に当てはまる変化はありません。"
+              : "判定に必要な観測や推定がまだそろっていません。";
+            $("breakSummary").textContent = (support.retrospective_preview ? "サンプルでの振り返り： " : "") + result;
+          }
           $("error").textContent = "";
           if(dataMode !== "real") $("sampleWarning").textContent =
             `サンプルを含む読み取り専用プレビューです。質問回答・設定変更はできません。表示元: ${d.sensor_source || d.sample_generation || "サンプル"}。合成データの評価は実データの予測性能を示しません。`;
