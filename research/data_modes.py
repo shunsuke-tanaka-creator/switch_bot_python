@@ -56,7 +56,9 @@ def is_training_row(row):
     if row["kind"] in TRAINING_KINDS:
         return True
     if row["kind"] == "narrative":
-        return row["payload"].get("question", {}).get("kind") in TRAINING_QUESTIONS
+        p = row["payload"]
+        return (not str(p.get("event_type", "")).startswith(("support_pre:", "support_post:"))
+                and p.get("question", {}).get("kind") in TRAINING_QUESTIONS)
     return False
 
 
