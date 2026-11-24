@@ -95,3 +95,14 @@ generations; it substituted same-thread execution for the async worker wrapper.
 Full pytest/FastAPI/HTTPX/PyTorch and production measurements could not
 run: dependencies were absent and network installation was blocked. `.git` is
 read-only, so the changes are uncommitted; nothing was pushed.
+
+Follow-up to `a9bb163`: main (`75b0f3c`) already omitted
+`model.sample_generation` in discovery mode: `Engine.status` returns
+`DiscoveryRuntime.status` before the legacy generation metadata is added.
+AST-isolated main/current status comparisons matched with fallback, explicitly active
+legacy, and personalized generations. The activation test assumed the legacy
+payload shape; it now uses `.get()` for both architectures and asserts key
+presence/absence, retaining the selection and preview-time assertions.
+Isolated activation assertions passed for both architectures with fallback and
+active legacy selection (HTTP routing/async workers bypassed). Personalized-sample
+unittest: 12 passed, 3 ML skips; API pytest could not run without pytest/server deps.

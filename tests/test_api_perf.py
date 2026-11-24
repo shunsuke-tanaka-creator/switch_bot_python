@@ -175,8 +175,15 @@ def test_sample_activation_refreshes_selection_and_preview_time(api):
     register_generation(store, rows, manifest, {}, [])
     activate_sample(store, "p001", sample_id)
     after = client.get(path).json()
-    assert before["model"]["sample_generation"] == "p001-sample"
-    assert after["model"]["sample_generation"] == sample_id
+    # Main (75b0f3c) omits generation metadata from discovery model status.
+    expected_before, expected_after = (
+        ("p001-sample", sample_id) if engine.architecture == "legacy" else (None, None)
+    )
+    assert before["model"].get("sample_generation") == expected_before
+    assert after["model"].get("sample_generation") == expected_after
+    for response in (before, after):
+        assert ("sample_generation" in response["model"]) == (engine.architecture == "legacy")
+    assert {answer["participant"] for answer in before["answers"]} == {"p001-sample"}
     assert {answer["participant"] for answer in after["answers"]} == {sample_id}
     assert dt(after["prediction"]["at"]) == preview
     assert engine.rows("p001", "sample") == store.rows(sample_id)
