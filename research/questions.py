@@ -132,6 +132,9 @@ class QuestionQueue:
         come from ``issued_history_rows`` (always the real participant history).
         """
         at = dt(at)
+        from .discovery_support import PRE, BREAK, POST, followup, linked_question
+        support_mode = getattr(self.insights, "support_mode", None)
+        support_enabled = support_mode == "live" or (not persist and support_mode == "shadow")
         gates = {
             name: dict(passed=False, detail="not evaluated")
             for name in (
@@ -151,6 +154,8 @@ class QuestionQueue:
                 "typing_reason_chain",
                 "place_anomaly",
                 "followup_outcome",
+                "discovery_support",
+                "discovery_support_budget",
                 "scheduled_kinds",
                 "scheduled_weather_mood",
                 "scheduled_current_state",
@@ -245,6 +250,10 @@ class QuestionQueue:
             for r in issued:
                 if completed(r) or expiry(r) <= at:
                     continue
+                if linked_question(r["payload"], issued) and (
+                    not support_enabled or not pref["interventions_enabled"]
+                ):
+                    continue
                 if (
                     r["payload"]["kind"] in ("breakCheck", "exerciseProposal")
                     and not pref["interventions_enabled"]
@@ -292,6 +301,38 @@ class QuestionQueue:
                 gates["daily_budget"]["passed"] = False
                 gates["daily_budget"]["detail"] += "; reserved night slot"
                 return result(None)
+            def issue_support(spec):
+                question = dict(
+                    id=str(uuid4()), participantID=p, kind=spec["kind"],
+                    prompt=spec["prompt"],
+                    options=[dict(label=a, value=b) for a,b in spec["options"]],
+                    allowFreeText=False, eventType=spec["event"],
+                    detectedAt=at.isoformat(timespec="milliseconds"),
+                    questionShownAt=None, snoozeCount=0,
+                    expiresAt=(at+timedelta(minutes=spec["ttl"])).isoformat(timespec="milliseconds"),
+                    context=dict(time_of_day="night" if at.hour>=22 else "afternoon",
+                                 typing_active=False, calendar_busy=False,
+                                 external_trigger="server-v2"),
+                )
+                if spec.get("related"):
+                    question["relatedID"] = spec["related"]
+                if spec.get("support"):
+                    question["support"] = spec["support"]
+                if persist:
+                    self.store.save("question_issued",question["id"],p,at,question)
+                gate("discovery_support",True,spec["event"])
+                return result(question)
+
+            # Only linked follow-ups bypass the ordinary inter-question gap. All
+            # questions still consume the same daily budget and respect opt-out.
+            if support_enabled and pref["interventions_enabled"]:
+                active, spec = followup(history_rows, at)
+                if active:
+                    if spec is not None:
+                        return issue_support(spec)
+                    gate("discovery_support",False,"waiting for accepted action")
+                    return result(None)
+
             recent = [dt(r["at"]) for r in issued if dt(r["at"]).date() == at.date()]
             gap_ok = not recent or at - max(recent) >= timedelta(
                 minutes=pref["gap_minutes"]
@@ -307,6 +348,29 @@ class QuestionQueue:
             if insight is None:
                 insight = self.insights.snapshot(p, at)
             fatigue, typing = insight["fatigue"], insight["typing"]
+            decision = insight.get("support") or {}
+            # Count episode starts rather than only accepted actions so repeated
+            # declined or skipped pre-assessments cannot exceed the daily cap.
+            today = [r for r in issued if dt(r["at"]).date()==at.date()]
+            starts = sum(r["payload"].get("eventType","").startswith(PRE) for r in today)
+            other_offers = sum(r["payload"]["kind"] in ("breakCheck","exerciseProposal")
+                               and not r["payload"].get("eventType","").startswith(BREAK) for r in today)
+            night_needed = not any(r["payload"]["kind"]=="nightReflection" for r in today)
+            room = (pref["daily_limit"]>4 and len(budget)+4+int(night_needed)<=pref["daily_limit"]
+                    and starts+other_offers<min(2,pref["intervention_limit"]))
+            if support_mode is not None:
+                gate("discovery_support_budget",room,
+                     f"{starts+other_offers}/{min(2,pref['intervention_limit'])} episodes; four question slots required")
+                gate("discovery_support",support_enabled and bool(decision.get("eligible")),
+                     decision.get("reason","no decision") if support_enabled else "not live")
+            if (support_enabled and pref["interventions_enabled"] and at.hour<22 and room
+                    and decision.get("eligible") and decision.get("actions")
+                    and (not persist or decision.get("data_mode")=="real")):
+                event = PRE+decision["bucket"]
+                if not any(r["payload"].get("eventType")==event for r in today):
+                    return issue_support(dict(kind="currentState",event=event,ttl=15,
+                        prompt="休憩の提案前に、現在の5つの状態を教えてください。全5項目の回答後に提案します。",
+                        options=[("回答を始める","start_current_state")],support=decision))
             recent_reason = next(
                 (
                     r["payload"]["payload"]["reason"]
@@ -359,7 +423,8 @@ class QuestionQueue:
 
             # Outcome is asked only after explicit acceptance, and never inferred from clicking alone.
             for r in issued:
-                if r["payload"]["kind"] != "breakCheck" or not timedelta(
+                if (r["payload"]["kind"] != "breakCheck"
+                    or r["payload"].get("eventType","").startswith(BREAK)) or not timedelta(
                     minutes=15
                 ) <= at - dt(r["at"]) <= timedelta(hours=3):
                     continue
@@ -399,6 +464,7 @@ class QuestionQueue:
                 kind is None
                 and pref["interventions_enabled"]
                 and len(offered) < pref["intervention_limit"]
+                and support_mode != "live"
                 and (
                     fatigue.get("acute")
                     or fatigue.get("high")
@@ -577,6 +643,7 @@ class QuestionQueue:
                         dt(r["at"])
                         for r in today
                         if r["payload"]["kind"] == "currentState"
+                        and not r["payload"].get("eventType","").startswith((PRE,POST))
                     ]
                     if previous and (pref['daily_limit'] <= 4 or at - max(previous) < timedelta(hours=3)):
                         gate("scheduled_current_state", False, "issued within 3h")

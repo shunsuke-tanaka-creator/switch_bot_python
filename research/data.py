@@ -104,6 +104,8 @@ class Timeline:
                 if p.get('scores'):
                     self.labels.append(Label(dt(p['end']), at, p.get('scope','current'), self.scores(p['scores']), id=r['id']))
             elif kind == 'narrative':
+                # Linked intervention assessments are evaluation-only, not ordinary labels.
+                if str(p.get('event_type', '')).startswith(('support_pre:', 'support_post:')): continue
                 at = max(at, dt(p.get('received_at', at)))
                 answer = p.get('answer', {})
                 question = p.get('question', {}).get('kind')

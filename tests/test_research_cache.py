@@ -241,6 +241,7 @@ class ResearchCacheTests(unittest.TestCase):
     def test_discovery_trends_refresh_after_a_same_day_answer(self):
         populate(self.store)
         runtime = SimpleNamespace(
+            config={},  # 追加: discovery supportの既定shadow設定を実runtimeと同じ属性で渡す。
             engine=SimpleNamespace(rows=lambda p, mode: self.store.rows(p)),
             load=lambda p, mode: None,
         )
