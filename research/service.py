@@ -260,7 +260,7 @@ class Engine:
         return dict(preview=True,participant=p,data_mode=data_mode_,
                     contains_sample=data_mode_!='real' or p==self.sample_participant,
                     at=iso(at),question=selected['question'],gates=selected['gates'],
-                    exercise=insight.get('exercise'))
+                    exercise=insight.get('exercise'),support=insight.get('support'))
 
     def pmtt(self,p,data_mode_='real'):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
@@ -492,6 +492,8 @@ def install(app,store,config):
                             for p in participants(store,engine.sample_participant):
                                 result=await asyncio.to_thread(engine.infer,p,None,'real')
                                 t=utc();store.save('inference',str(uuid4()),p,t,result)
+                                if engine.discovery is not None:
+                                    await asyncio.to_thread(engine.insights.record_support,p,t,result)
                         except Exception:logging.exception('Research inference failed')
                         await asyncio.sleep(60)
                 async def training_loop():
