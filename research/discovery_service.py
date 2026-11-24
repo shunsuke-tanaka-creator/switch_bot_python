@@ -41,9 +41,10 @@ class DiscoveryRuntime:
         cached = self.cache.get(key)
         if cached is not None:
             if mode!="real":
-                from .data_modes import source_identity
-                identity=source_identity(self.store,participant,mode,self.engine.sample_participant,self.engine.sample_manifest)
-                if cached[0]["report"].get("sample_manifest_hash")!=identity["sample_manifest_hash"]:
+                from .data_modes import resolved_sample_participant, sample_manifest_identity
+                selected=resolved_sample_participant(self.store,participant,self.engine.sample_participant)
+                manifest_hash=sample_manifest_identity(self.store,mode,selected,self.engine.sample_manifest)
+                if cached[0]["report"].get("sample_manifest_hash")!=manifest_hash:
                     return None
             return cached
         import torch
@@ -52,9 +53,10 @@ class DiscoveryRuntime:
         if state.get("version")!=VERSION or state.get("features")!=FEATURES:
             return None
         if mode!="real":
-            from .data_modes import source_identity
-            identity=source_identity(self.store,participant,mode,self.engine.sample_participant,self.engine.sample_manifest)
-            if state["report"].get("sample_manifest_hash")!=identity["sample_manifest_hash"]:
+            from .data_modes import resolved_sample_participant, sample_manifest_identity
+            selected=resolved_sample_participant(self.store,participant,self.engine.sample_participant)
+            manifest_hash=sample_manifest_identity(self.store,mode,selected,self.engine.sample_manifest)
+            if state["report"].get("sample_manifest_hash")!=manifest_hash:
                 return None
         model = DiscoveryModel(**state["settings"])
         model.load_state_dict(state["weights"]); model.eval()
@@ -229,14 +231,20 @@ class DiscoveryInsights:
         self.runtime=runtime
         self.trend_cache={}
 
-    def snapshot(self,p,at,prediction=None,rows=None,data_mode="real"):
+    def snapshot(self,p,at,prediction=None,rows=None,data_mode="real",*,fingerprints=None):
         from .baseline import conditional, weekday_trends
         from .topology import typing_windows
         from .insights import typing_change
         at=dt(at)
         rows=self.runtime.engine.rows(p,data_mode) if rows is None else rows
         source=available_rows(rows,at)
-        key=(p,data_mode,at.date().isoformat())
+        from .api_cache import content_fingerprint
+        # Include answers, not just the calendar date: late answers arrive all day.
+        labels=[r for r in source if r["kind"] in ("narrative","correction")]
+        signature=tuple(sorted((owner,keys[1]) for owner,keys in fingerprints.items())) if fingerprints else (
+            content_fingerprint(labels),
+            sum(max(dt(r["at"]),dt(r["payload"].get("received_at",r["at"])))<at for r in labels))
+        key=(p,data_mode,at.date().isoformat(),signature)
         trends=self.trend_cache.get(key)
         if trends is None:
             trends=weekday_trends(rows,at)

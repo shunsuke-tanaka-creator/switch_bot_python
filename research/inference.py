@@ -17,7 +17,7 @@ def infer_state(engine,p,at=None,data_mode_='real'):
     from .delivery import apply_delivery
     response=apply_delivery(engine,p,at,data_mode_,rows,response)
     if response.get('current') is not None:
-        _comparisons(response,Timeline(rows),at)
+        _comparisons(response,Timeline([r for r in rows if r['kind'] in ('narrative','correction')]),at)
     return response
 
 
@@ -35,9 +35,10 @@ def _infer_lstm(engine,p,at,data_mode_,rows):
     from .delivery import read_checkpoint
     state,response['model_id']=read_checkpoint(checkpoint)
     if data_mode_!='real':
-        from .data_modes import source_identity
-        identity=source_identity(engine.store,p,data_mode_,engine.sample_participant,engine.sample_manifest)
-        if state['report'].get('sample_manifest_hash')!=identity['sample_manifest_hash']:
+        from .data_modes import resolved_sample_participant, sample_manifest_identity
+        selected=resolved_sample_participant(engine.store,p,engine.sample_participant)
+        manifest_hash=sample_manifest_identity(engine.store,data_mode_,selected,engine.sample_manifest)
+        if state['report'].get('sample_manifest_hash')!=manifest_hash:
             response['status']='generation_changed';return response
     if state.get('version')!=VERSION or state.get('features')!=FEATURES:
         response['status']='incompatible_checkpoint';return response

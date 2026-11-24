@@ -7,6 +7,7 @@ from .data import dt
 from .baseline import conditional, weekday_trends
 from .topology import VERSION as TOPOLOGY_VERSION
 from .topology import available_rows, typing_windows, behavior_map
+from .api_cache import content_fingerprint
 
 
 # 追加: Compendium系の一般的なMETs参照値。医療的な処方値ではない。
@@ -556,9 +557,15 @@ class InsightEngine:
         self.cache = {}
         self.trend_cache = {}
 
-    def snapshot(self, p, at, prediction=None, rows=None, data_mode="real"):
+    def snapshot(self, p, at, prediction=None, rows=None, data_mode="real", *, fingerprints=None):
         at = dt(at)
-        rows = available_rows(self.store.rows(p) if rows is None else rows, at)
+        supplied = self.store.rows(p) if rows is None else rows
+        # Heartbeats choose combined source freshness, but no single-source
+        # detector consumes them. Avoid sorting/parsing that large history.
+        rows = available_rows(
+            supplied if data_mode == "combined" else
+            (r for r in supplied if r["kind"] != "heartbeat"), at,
+        )
         if data_mode == "combined":
             from .data import inference_rows
             groups = {}
@@ -567,7 +574,8 @@ class InsightEngine:
             if groups:
                 _, selected = inference_rows(rows, at, p)
                 by_source = {owner: self.snapshot(owner, at, prediction if owner == selected else None,
-                              group, "sample" if owner.endswith("-sample") else "real")
+                              group, "sample" if owner.endswith("-sample") else "real",
+                              fingerprints=fingerprints)
                              for owner, group in groups.items()}
                 return dict(by_source[selected], by_source=by_source, sensor_source=selected, preview_support=True)
         rows = [r for r in rows if not (r["kind"] == "research_event" and r["payload"]["kind"] == "place_visit")]
@@ -585,33 +593,41 @@ class InsightEngine:
                 "state_step_snapshot",
             )
         ]
-        signature = tuple((r.get("seq"), r["kind"], r["id"]) for r in source)
+        keys = (fingerprints or {}).get(p)
+        label_source = [r for r in source if r["kind"] in ("narrative", "correction")]
+        # Labels become baseline evidence strictly after reception. Equality and
+        # one microsecond later must have different keys even within one bucket.
+        label_key = keys[1] if keys else (
+            content_fingerprint(label_source),
+            sum(max(dt(r["at"]), dt(r["payload"].get("received_at", r["at"]))) < at
+                for r in label_source),
+        )
+        signature = keys[0] if keys else (content_fingerprint(source), label_key)
         bucket = at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0)
         cache_id = (p, data_mode)
         key = (cache_id, signature, bucket)
-        if self.cache.get(cache_id, {}).get("key") == key:
-            fixed = self.cache[cache_id]["data"]
+        cached = self.cache.get(cache_id)
+        if cached is not None and cached["key"] == key:
+            fixed = cached["data"]
         else:
             windows = typing_windows(rows, at)
             trend_key = (
                 cache_id,
-                tuple(
-                    (r.get("seq"), r["id"])
-                    for r in source
-                    if r["kind"] in ("narrative", "correction")
-                ),
+                label_key,
                 at.date(),
             )
-            if self.trend_cache.get(cache_id, {}).get("key") != trend_key:
-                self.trend_cache[cache_id] = dict(
+            trend = self.trend_cache.get(cache_id)
+            if trend is None or trend["key"] != trend_key:
+                trend = dict(
                     key=trend_key,
                     data=weekday_trends(
                         rows, at, min_weeks=self.config.get("trend_min_weeks", 6)
                     ),
                 )
+                self.trend_cache[cache_id] = trend
             fixed = dict(
                 baseline=conditional(rows, at),
-                trends=self.trend_cache[cache_id]["data"],
+                trends=trend["data"],
                 typing=typing_change(
                     windows,
                     at,

@@ -2,6 +2,7 @@
 import asyncio
 from collections import Counter
 from contextlib import asynccontextmanager, suppress
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -17,9 +18,11 @@ from .data_modes import (
     DATA_MODES,
     DEFAULT_SAMPLE_PARTICIPANT,
     data_mode,
-    rows_for_mode,
-    source_identity,
+    participants_for_mode,
+    resolved_sample_participant,
+    sample_manifest_identity,
 )
+from .api_cache import RecordView, ResearchCache, row_order
 from .events import ResearchEvent
 from .context_service import ContextEngine
 from .insights import InsightEngine
@@ -34,6 +37,10 @@ def identifier(p):
 def mode(value):
     try:return data_mode(value)
     except ValueError as exc:raise HTTPException(422,str(exc)) from exc
+
+
+INSIGHT_KINDS=('session','narrative','correction','research_event','context_inference',
+               'step_snapshot','state_step_snapshot','inference','switchbot','switchbot_observation')
 
 
 class Heartbeat(BaseModel):
@@ -133,6 +140,7 @@ def pmtt_projection(graph):
 class Engine:
     def __init__(self,store,config):
         self.store=store;self.config=config
+        self.api_cache=ResearchCache(store)
         self.root=Path(config.get('research_models','data/models'));self.root.mkdir(parents=True,exist_ok=True)
         self.sample_participant=config.get('research_sample_participant',DEFAULT_SAMPLE_PARTICIPANT)
         self.sample_manifest=Path(config.get('research_sample_manifest',f'data/sample/{self.sample_participant}/manifest.json'))
@@ -150,8 +158,63 @@ class Engine:
             self.insights=InsightEngine(store,config)
         self.questions=QuestionQueue(store,self.insights)
 
+    def record_view(self,p,data_mode_='real',kinds=None):
+        p=identifier(p);data_mode_=data_mode(data_mode_)
+        selected=(resolved_sample_participant(self.store,p,self.sample_participant)
+                  if data_mode_!='real' else self.sample_participant)
+        sources=participants_for_mode(p,data_mode_,selected)
+        views=[self.api_cache.records(source,kinds) for source in sources]
+        if len(views)==1:return views[0]
+        from heapq import merge
+        signature=tuple((source,view.fingerprint) for source,view in zip(sources,views))
+        return self.api_cache.compute(
+            ('rows',p,data_mode_,tuple(sorted(kinds)) if kinds is not None else None),
+            signature,
+            lambda:RecordView(list(merge(*(v.rows for v in views),key=row_order,reverse=True)),signature),
+        )
+
     def rows(self,p,data_mode_='real'):
-        return rows_for_mode(self.store,identifier(p),data_mode(data_mode_),self.sample_participant)
+        # Snapshots are read-only; copy an individual payload before enriching it.
+        return self.record_view(p,data_mode_).rows
+
+    def insight_snapshot(self,p,at,prediction,records,data_mode_):
+        selected=(resolved_sample_participant(self.store,p,self.sample_participant)
+                  if data_mode_!='real' else self.sample_participant)
+        fingerprints={}
+        kinds=('session','narrative','correction','research_event',
+               'context_inference','step_snapshot','state_step_snapshot')
+        for owner in participants_for_mode(p,data_mode_,selected):
+            view=self.api_cache.records(owner,kinds)
+            labels=self.api_cache.records(owner,('narrative','correction'))
+            fingerprints[owner]=( (view.fingerprint,view.time_key(at)),
+                                  (labels.fingerprint,labels.time_key(at)) )
+        # Sample mode uses the requesting participant as its existing cache slot.
+        if data_mode_=='sample':fingerprints[p]=fingerprints[selected]
+        return self.insights.snapshot(p,at,prediction,records,data_mode_,fingerprints=fingerprints)
+
+    def file_revision(self,path):
+        path=Path(path)
+        try:
+            stat=path.stat()
+            return str(path),stat.st_mtime_ns,stat.st_ctime_ns,stat.st_size,stat.st_ino
+        except FileNotFoundError:
+            return str(path),None
+
+    def context_snapshot(self,p,at,*,include_details=True):
+        kinds=('context_candidate','research_event','context_inference','context_review')
+        view=self.record_view(p,'real',kinds)
+        model_time=None
+        if self.discovery is not None:
+            loaded=self.discovery.load(p)
+            model_time=bool(loaded and dt(loaded[0]['report']['trained_through'])<=dt(at))
+        signature=(view.fingerprint,view.time_key(at),model_time,
+                   self.file_revision(self.context.directory(p)/'status.json'),
+                   self.file_revision(self.context.directory(p)/'active.pt'))
+        result=self.api_cache.compute(
+            ('context',p),signature,lambda:self.context.snapshot(p,at,view.rows),
+        )
+        return {k:v for k,v in result.items()
+                if include_details or k not in ('history','reviews')}
     def preview_at(self,p,data_mode_='real',at=None):
         if at is not None or data_mode_=='real':
             return dt(at or utc())
@@ -160,7 +223,7 @@ class Engine:
         if manifest and manifest.get('preview_at'):
             if data_mode_=='sample':
                 return dt(manifest['preview_at'])
-            observed=[dt(r['payload'].get('received_at',r['at'])) for r in self.rows(p,data_mode_)
+            observed=[dt(r['payload'].get('received_at',r['at'])) for r in self.record_view(p,data_mode_,('session',)).rows
                       if r['kind']=='session' and not r['participant'].endswith('-sample')]
             return max([dt(manifest['preview_at']),*observed])
         return dt(utc())
@@ -187,9 +250,8 @@ class Engine:
             selected=active_generation(self.store,p,self.sample_participant)
             result['sample_generation']=selected
             result['preview_support']=True
-            from .data_modes import source_identity
-            identity=source_identity(self.store,p,data_mode_,self.sample_participant,self.sample_manifest)
-            if result.get('sample_manifest_hash')!=identity['sample_manifest_hash'] and result.get('status')=='trained':
+            manifest_hash=sample_manifest_identity(self.store,data_mode_,selected,self.sample_manifest)
+            if result.get('sample_manifest_hash')!=manifest_hash and result.get('status')=='trained':
                 result['status']='generation_changed'
         error=self.read_path(p,data_mode_,'error.json')
         if error.exists():result['last_error']=json.loads(error.read_text())
@@ -263,14 +325,31 @@ class Engine:
                     exercise=insight.get('exercise'))
 
     def pmtt(self,p,data_mode_='real'):
+        kinds=('session','narrative','switchbot','correction','inference',
+               'step_snapshot','state_step_snapshot','question_issued',
+               'context_candidate','context_inference','research_event')
+        view=self.record_view(p,data_mode_,kinds)
+        at=self.preview_at(p,data_mode_)
+        selected=(resolved_sample_participant(self.store,p,self.sample_participant)
+                  if data_mode_!='real' else self.sample_participant)
+        newest=[(self.api_cache.newest(owner),owner)
+                for owner in participants_for_mode(p,data_mode_,selected)]
+        owner_order=tuple(owner for latest,owner in sorted(
+            ((latest,owner) for latest,owner in newest if latest is not None), reverse=True))
+        return self.api_cache.compute(
+            ('pmtt',p,data_mode_),(view.fingerprint,view.time_key(at),owner_order),
+            lambda:self._pmtt(p,data_mode_,view.rows,at,owner_order),
+        )
+
+    def _pmtt(self,p,data_mode_,rows,at,owner_order=None):
         # Explicit provenance graph: observations, work episodes, days, fixed weeks, and corrections.
-        rows=self.rows(p,data_mode_);nodes={};edges=[]
+        nodes={};edges=[]
         for r in rows:
             if r['kind'] not in {'session','narrative','switchbot','correction','inference','step_snapshot','state_step_snapshot'}:continue
             prefix=r['participant']+':' if data_mode_!='real' else ''
             provenance=(dict(participant=r['participant'],data_source='synthetic' if r['participant'].endswith('-sample') else 'real')
                         if data_mode_!='real' else {})
-            at=dt(r['at']);week=prefix+'week:'+monday(at).date().isoformat();day=prefix+'day:'+at.date().isoformat();work=prefix+'work:'+at.replace(minute=0,second=0,microsecond=0).isoformat()
+            observed_at=dt(r['at']);week=prefix+'week:'+monday(observed_at).date().isoformat();day=prefix+'day:'+observed_at.date().isoformat();work=prefix+'work:'+observed_at.replace(minute=0,second=0,microsecond=0).isoformat()
             for key,kind in [(week,'Pattern'),(day,'Day'),(work,'StateEpisode')]:nodes[key]=dict(id=key,kind=kind,**provenance)
             key=prefix+r['kind']+':'+r['id'];nodes[key]=dict(id=key,kind='Observation',source=r['kind'],at=r['at'],**provenance)
             edges.extend([dict(source=key,target=work,kind='provenance'),dict(source=work,target=day,kind='part_of'),dict(source=day,target=week,kind='part_of')])
@@ -286,10 +365,10 @@ class Engine:
             if source in nodes:edges.append(dict(source=source,target=key,kind='supports'))
         from .context_data import catalog
         from .context_data import resolve
-        groups={}
+        groups={owner:[] for owner in owner_order or ()}
         for r in rows:groups.setdefault(r['participant'],[]).append(r)
         for owner,group in groups.items():
-            classes,aliases=catalog(group,self.preview_at(p,data_mode_))
+            classes,aliases=catalog(group,at)
             prefix=owner+':' if data_mode_!='real' else ''
             provenance=dict(participant=owner,data_source='synthetic' if owner.endswith('-sample') else 'real') if data_mode_!='real' else {}
             for axis in ('place','task'):
@@ -372,12 +451,17 @@ def install(app,store,config):
         p=identifier(participant);data_mode_=mode(data_mode_)
         forwarded=await proxy(f'/api/research/{p}/insights?data_mode={data_mode_}')
         if forwarded:return forwarded
-        records=engine.rows(p,data_mode_)
+        # Combined selection still needs heartbeat freshness; single-source
+        # insight detectors consume only the kinds listed here.
+        records=(engine.rows(p,data_mode_) if data_mode_=='combined'
+                 else engine.record_view(p,data_mode_,INSIGHT_KINDS).rows)
         at=engine.preview_at(p,data_mode_)
         prediction=None if data_mode_=='real' else await asyncio.to_thread(engine.infer,p,at,data_mode_)
-        result=await asyncio.to_thread(engine.insights.snapshot,p,at,prediction,records,data_mode_)
-        result['context']=await asyncio.to_thread(engine.context.snapshot,p,utc(),records,include_details=False) if data_mode_=='real' else dict(status='real_only')
-        result['preferences']=question_settings(engine.rows(p,'real'))
+        result=await asyncio.to_thread(engine.insight_snapshot,p,at,prediction,records,data_mode_)
+        result['context']=await asyncio.to_thread(engine.context_snapshot,p,utc(),include_details=False) if data_mode_=='real' else dict(status='real_only')
+        pref_view=engine.record_view(p,'real',('heartbeat','intervention_feedback','research_event'))
+        result['preferences']=engine.api_cache.compute(('preferences',p),pref_view.fingerprint,
+                                                      lambda:question_settings(pref_view.rows))
         result['data_mode']=data_mode_;result['contains_sample']=data_mode_!='real' or p==engine.sample_participant
         if data_mode_!='real':
             result['sample_generation']=engine.status(p,data_mode_).get('sample_generation')
@@ -393,7 +477,7 @@ def install(app,store,config):
     async def context_snapshot(participant:str):
         p=identifier(participant)
         forwarded=await proxy(f'/api/research/{p}/context')
-        return forwarded or await asyncio.to_thread(engine.context.snapshot,p,utc())
+        return forwarded or await asyncio.to_thread(engine.context_snapshot,p,utc())
 
     @app.post('/api/research/{participant}/context/review/{day}')
     async def context_review(participant:str,day:str):
@@ -419,12 +503,12 @@ def install(app,store,config):
         forwarded=await proxy(f'/api/research/{p}/overview?data_mode={data_mode_}')
         if forwarded:return forwarded
         # Inference is persisted by the worker, not by every dashboard poll.
-        records=engine.rows(p,data_mode_)
+        records=engine.record_view(p,data_mode_,('inference','narrative','correction')).rows
         if data_mode_=='real':
             latest=next((r['payload'] for r in records if r['kind']=='inference' and r['payload'].get('data_mode','real')=='real'
                          and r['payload'].get('architecture','legacy')==engine.architecture),None)
             stale=latest is None or (dt(utc())-dt(latest['at'])).total_seconds()>180
-            prediction=latest if not stale else dict(status='worker_not_running_or_stale',current=None,daily=None,data_mode='real',contains_sample=False)
+            prediction=deepcopy(latest) if not stale else dict(status='worker_not_running_or_stale',current=None,daily=None,data_mode='real',contains_sample=False)
         else:
             prediction=await asyncio.to_thread(engine.infer,p,None,data_mode_)
         # Older worker records contain only LSTM estimates; add provenance for
