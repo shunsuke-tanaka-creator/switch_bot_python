@@ -261,17 +261,33 @@ class DiscoveryInsights:
         at=dt(at)
         rows=self.runtime.engine.rows(p,data_mode) if rows is None else rows
         source=available_rows(rows,at)
+        # 追加: combinedの比較は参加者別に計算し、Legacyと同じ観測鮮度で表示元を選ぶ。
+        groups={p:rows}
+        selected=p
+        if data_mode=="combined":
+            from .data import inference_rows
+            groups={}
+            for row in source:
+                groups.setdefault(row["participant"],[]).append(row)
+            if groups:
+                _,selected=inference_rows(source,at,p)
+            else:
+                groups={p:[]}
         from .api_cache import content_fingerprint
         # Include answers, not just the calendar date: late answers arrive all day.
         labels=[r for r in source if r["kind"] in ("narrative","correction")]
         signature=tuple(sorted((owner,keys[1]) for owner,keys in fingerprints.items())) if fingerprints else (
             content_fingerprint(labels),
             sum(max(dt(r["at"]),dt(r["payload"].get("received_at",r["at"])))<at for r in labels))
-        key=(p,data_mode,at.date().isoformat(),signature)
+        key=(p,data_mode,at.date().isoformat(),tuple(sorted(groups)),signature)  # 追加: 比較参加者の変化も反映する。
         trends=self.trend_cache.get(key)
         if trends is None:
-            trends=weekday_trends(rows,at)
+            trends={owner:weekday_trends(group,at) for owner,group in groups.items()}  # 追加: 曜日傾向もsource別。
             self.trend_cache={key:trends}
+        # 追加: 同時刻回答や同じ端末の入力窓を、他参加者の比較へ混在させない。
+        comparisons={owner:dict(baseline=conditional(group,at),trends=trends[owner],
+                                typing=typing_change(typing_windows(group,at),at))
+                     for owner,group in groups.items()}
         patterns=dict(nodes=[],edges=[],current=None,latest=None,aliases={},
                       status="untrained",version=VERSION,at_capacity=False)
         loaded=self.runtime.load(p,data_mode)
@@ -291,10 +307,9 @@ class DiscoveryInsights:
             active=None
         support=decision_with_actions(support_rows,at,data_mode,self.runtime.config,active)
         support["retrospective_preview"] = data_mode=="sample"
-        return dict(version=VERSION,architecture="discovery",at=at.isoformat(),patterns=patterns,
+        result=dict(version=VERSION,architecture="discovery",at=at.isoformat(),patterns=patterns,
                     support=support,
-                    baseline=conditional(rows,at),trends=trends,
-                    typing=typing_change(typing_windows(rows,at),at),
+                    **comparisons[selected],  # 追加: 選択された参加者の比較だけを表示する。
                     places=dict(nodes=[],edges=[],current=None,latest=None,
                                 destination=dict(status="gps_disabled",places=[]),anomaly=None,time_anomaly=None),
                     weather=[dict(at=r["at"],weather=r["payload"]["payload"]["weather"],source="self_report")
@@ -302,3 +317,7 @@ class DiscoveryInsights:
                     exercise=dict(status="disabled",low=False,reason="discovery_state_baseline_not_validated"),
                     fatigue=dict(status="insufficient_data",acute=False,high=False,
                                  reason="discovery_delivery_not_validated"))
+        # 追加: combined表示の算出元を示し、支援判断の既存combined条件は保持する。
+        if data_mode=="combined":
+            result["sensor_source"]=selected
+        return result

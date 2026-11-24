@@ -175,7 +175,8 @@
       </section>
       <section>
         <h2>質問と提案</h2>
-        <div id="breakPanel" class="notice" hidden><strong>休憩の目安</strong><p id="breakSummary"></p><small>疲労・集中度・眠気を5分ごとに見て、同じ変化が2区間続いたかを確認します。</small></div>
+        <!-- 追加: 新方式の休憩候補と支援質問の配信モードを区別する。 -->
+        <div id="breakPanel" class="notice" hidden><strong>休憩の目安</strong><p id="breakSummary"></p><p id="supportMode"></p><small>疲労・集中度・眠気を5分ごとに見て、同じ変化が2区間続いたかを確認します。</small></div>
         <button id="answer">今の質問に回答</button
         ><button id="refresh">更新</button>
         <div>
@@ -183,11 +184,12 @@
           ><label
             ><input id="interventions" type="checkbox" />休憩などの提案</label
           ><label
-            ><input id="exerciseProposals" type="checkbox" />歩数不足時の運動提案</label
+            ><input id="exerciseProposals" type="checkbox" /><span id="exerciseLabel">歩数不足時の運動提案</span></label
           >
         </div>
         <p id="budget"></p>
-        <p class="muted">
+        <!-- 追加: 候補計算だけのモードで実配信を示す説明を避ける。 -->
+        <p id="proposalDescription" class="muted">
           短い休憩・軽い気分転換・作業の切り替えを提案します。実行と役立ち度は別に確認します。
         </p>
       </section>
@@ -204,16 +206,15 @@
           </div>
           <!-- 追加: 運動提案を出さない段階も含め、歩数検出器の状態を表示する。 -->
           <div>
-            <h3>トポロジカル状態別の歩数</h3>
+            <h3 id="exerciseHeading">トポロジカル状態別の歩数</h3>
             <p id="exercise"></p>
           </div>
         </div>
       </section>
       <section>
         <h2>曜日 × 時間帯の疲労傾向</h2>
-        <p>
-          本人の回答を日単位で集約し、同じ活動内で比較します。十分な週数と日数がない場合は表示しません。
-        </p>
+        <!-- 追加: combinedでも本人とサンプルを混ぜず、表示元を明示する。 -->
+        <p id="trendNote">参加者（source）別に回答を日単位で集約し、同じ活動内で比較します。十分な週数と日数がない場合は表示しません。</p>
         <div class="scroll"><table id="trends"></table></div>
       </section>
       <section>
@@ -224,9 +225,8 @@
         <p id="patternSummary"></p>
         <svg id="patterns" role="img" aria-label="生活パターンの遷移"></svg>
         <div class="scroll"><table id="patternRows"></table></div>
-        <p>
-          3日以上に現れたノードは定着、それ以前は新出として表示します。本人の承認は不要です。
-        </p>
+        <!-- 追加: 生活パターンの状態と確認条件を構成別に説明する。 -->
+        <p id="patternNote"></p>
       </section>
       <dialog id="question">
         <h2 id="prompt"></h2>
@@ -337,6 +337,8 @@
         try {
           const d = await request(api + "/insights?data_mode=" + dataMode);
           snapshot = d;
+          // 追加: APIの構成を基に停止中の機能と従来機能を区別する。
+          const discovery = d.architecture === "discovery";
           $("breakPanel").hidden = !d.support;
           if (d.support) {
             const support = d.support;
@@ -346,14 +348,33 @@
               : support.status === "available" ? "今回、休憩候補の条件に当てはまる変化はありません。"
               : "判定に必要な観測や推定がまだそろっていません。";
             $("breakSummary").textContent = (support.retrospective_preview ? "サンプルでの振り返り： " : "") + result;
+            // 追加: 実記録の配信モードと、保存・配信をしないサンプル表示を区別する。
+            $("supportMode").textContent = dataMode === "real" ? {
+              shadow: "現在はshadowモードです。新方式の休憩候補を計算し、研究workerが稼働している場合は記録しますが、新方式の支援質問は配信しません。",
+              live: "現在はliveモードです。研究処理が有効で、支援条件と質問予算を満たした場合に新方式の支援質問を配信します。",
+              off: "現在はoffモードです。新方式の休憩候補の判定・配信は停止しています。",
+            }[support.delivery_mode] : `設定は${support.delivery_mode}モードです。` +
+              (dataMode === "combined"
+                ? "実記録とサンプルを合わせた表示では、新方式の休憩判定と支援質問の配信を行いません。"
+                : support.delivery_mode === "off"
+                  ? "サンプルの休憩判定は停止中です。"
+                  : "サンプルでは振り返り用のプレビューを一時的に計算します。判定の保存と支援質問の配信は行いません。");
           }
+          // 追加: 新支援の配信と従来の入力訂正由来breakCheckは別経路である。
+          $("proposalDescription").textContent = dataMode !== "real"
+            ? "サンプルを含む表示は読み取り専用です。提案の保存・配信は行いません。"
+            : discovery
+            ? "新方式の支援質問は実記録のみ、liveで条件を満たす場合に配信します。実行と役立ち度は別に確認します。off／shadowでは、入力訂正とmistype回答に基づく従来の休憩提案が別の条件で発生する場合があります。liveではこの従来経路を抑止します。"
+            : "短い休憩・軽い気分転換・作業の切り替えを提案します。実行と役立ち度は別に確認します。";
           $("error").textContent = "";
           if(dataMode !== "real") $("sampleWarning").textContent =
             `サンプルを含む読み取り専用プレビューです。質問回答・設定変更はできません。表示元: ${d.sensor_source || d.sample_generation || "サンプル"}。合成データの評価は実データの予測性能を示しません。`;
           const f = d.fatigue,
             t = d.typing;
           $("fatigue").textContent =
-            f.status === "available"
+            discovery
+              ? "この従来方式の疲労比較は、新方式では停止しています。現在の疲労推定は「今日の状態」、新方式の休憩判定は「休憩の目安」で確認できます。"
+              : f.status === "available"
               ? `推定 ${f.value.toFixed(1)} / 普段 ${f.expected.toFixed(1)} / 差 ${f.difference.toFixed(1)}点。${f.acute ? "継続する上昇候補。" : ""}${f.high ? "疲労は高めです。" : ""}`
               : "推定・比較に必要な回答または観測が不足しています。";
           $("typing").textContent =
@@ -362,8 +383,13 @@
               : "同じ入力方式の比較用データが不足しています。";
           // 追加: 状態ID・場所・アクション・基準日数・抑止理由を表示する。
           const exercise = d.exercise;
+          // 追加: Discoveryでは状態別歩数と運動提案を停止中として表示する。
+          $("exerciseLabel").textContent = discovery ? "歩数不足時の運動提案（従来方式のみ）" : "歩数不足時の運動提案";
+          $("exerciseHeading").textContent = discovery ? "状態別の歩数（従来方式のみ）" : "トポロジカル状態別の歩数";
           $("exercise").textContent =
-            exercise.status === "available"
+            discovery
+              ? "新方式では状態別歩数の計算・運動提案を停止しています。"
+              : exercise.status === "available"
               ? `状態 ${exercise.context.state_id}（${exercise.context.place_name || exercise.context.place_id}・${exercise.context.action_name || exercise.context.action_id}）、通常${exercise.usual_steps}歩 / 今日${exercise.today_steps}歩。基準${exercise.baseline_days}日・${exercise.baseline_occurrences}回（${exercise.baseline_stage === "formal" ? "正式" : "暫定"}）。${exercise.low ? `不足${exercise.shortage_steps}歩。` : "提案閾値未満です。"}`
               : `提案しません：${exercise.reason || "歩数データ不足"}。`;
           $("weatherHistory").textContent = d.weather
@@ -379,9 +405,15 @@
           $("interventions").checked = d.preferences.interventions_enabled;
           // 追加: 歩数データ提供同意とは独立した運動提案設定を表示する。
           $("exerciseProposals").checked =
-            d.preferences.exercise_proposals_enabled;
+            !discovery && d.preferences.exercise_proposals_enabled;
           $("budget").textContent =
             `質問は1日${d.preferences.daily_limit}回、うち提案${d.preferences.intervention_limit}回まで。間隔${d.preferences.gap_minutes}分。`;
+          // 追加: source別集計後の表示元は推論と同じ観測の鮮度規則で選ぶ。
+          $("trendNote").textContent =
+            "参加者（source）別に回答を日単位で集約し、同じ活動内で比較します。十分な週数と日数がない場合は表示しません。" +
+            (dataMode === "combined"
+              ? `実記録とサンプルを合わせた表示では、推論と同じ観測の鮮度規則で表示元を選びます。曜日傾向・比較基準・入力修正の表示元：${d.sensor_source ?? "未選択（観測なし）"}。`
+              : dataMode === "sample" ? "表示は合成データの傾向です。" : "表示は本人の実記録の傾向です。");
           $("trends").replaceChildren();
           row(
             $("trends"),
@@ -415,10 +447,12 @@
             const data = d[type];
             graph(type, data, prefix);
             $(id).replaceChildren();
-            row($(id), ["クラス", "件数", "日数"], true);
+            // 追加: 日数による定着と本人確認済みを別の状態として表示する。
+            row($(id), ["クラス", "状態", "件数", "日数"], true);
             data.nodes.forEach((n, i) =>
               row($(id), [
-                prefix + (i + 1) + (n.status === "emerging" ? "（新出）" : ""),
+                prefix + (i + 1),
+                (discovery ? {confirmed: "本人確認済み", emerging: "未確認候補"} : {established: "定着", emerging: "新出"})[n.status] || n.status,
                 n.count,
                 n.days,
               ]),
@@ -427,9 +461,13 @@
           $("patternSummary").textContent =
             `生活${d.patterns.nodes.length}クラス・遷移${d.patterns.edges.length}接続。` +
             (d.patterns.nodes.length > 30
-              ? "図は直近30クラス、表は全クラスを表示。"
+              ? "図は一覧の末尾30候補、表は全候補を表示します。"
               : "") +
             (d.patterns.at_capacity ? "上限に達しています。" : "");
+          // 追加: 確認条件は構成により異なり、Discoveryは日数だけでは確認済みとしない。
+          $("patternNote").textContent = discovery
+            ? "新方式では、本人確認済みと未確認候補を区別します。日数だけでは確認済みとしません。"
+            : "従来方式では、3日以上観測されたノードを定着、それ以前を新出として表示します。";
           applyReadOnly();
         } catch (e) {
           $("error").textContent = e.message;
@@ -442,7 +480,8 @@
         $("defer").disabled = value;
         $("questions").disabled = value;
         $("interventions").disabled = value;
-        $("exerciseProposals").disabled = value;
+        // 追加: Legacyの設定操作を保持し、Discoveryのみ運動提案設定を無効化する。
+        $("exerciseProposals").disabled = value || snapshot?.architecture === "discovery";
         for (const button of $("weatherButtons").querySelectorAll("button"))
           button.disabled = value;
         $("dashboardLink").href =

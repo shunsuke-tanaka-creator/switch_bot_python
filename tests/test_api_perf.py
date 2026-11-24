@@ -208,6 +208,8 @@ def test_context_expiry_and_model_status_changes_remain_live(api, monkeypatch):
 def test_answer_edit_after_snapshot_does_not_poison_insight_cache(api, mode, monkeypatch):
     client, engine, store = api
     owner = "p001" if mode == "real" else "p001-sample"
+    if mode == "combined" and engine.architecture == "discovery":
+        owner = "p001"  # 追加: source分離後は、表示元本人の回答編集でcacheの更新を検証する。
     monkeypatch.setattr(engine, "infer", lambda *args: None)
     trends = Mock(side_effect=lambda rows, at, **kwargs: dict(
         fatigue=sum(json.loads(r["payload"]["answer"]["free_text"])["fatigue"]

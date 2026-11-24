@@ -2,7 +2,7 @@
 
 SwitchBot開閉センサーとiOS [communication-keyboard](https://github.com/shunsuke-tanaka-creator/communication-keyboard) の入力・回答をSQLiteに収集し、状態5尺度と拠点・タスクを研究するPythonサーバーです。Macで収集、MacまたはUbuntuで学習・評価・推論します。研究日はAsia/Tokyo固定です。
 
-**既定は収集のみ（自動学習OFF）です。** GPS分類・行き先予測はありません。BLEの開閉だけで在宅や睡眠を断定しません。
+**既定では自動研究workerと自動質問配信を停止します。** 研究画面・読取APIと、明示的な手動学習APIは利用できます。GPS分類・行き先予測はありません。BLEの開閉だけで在宅や睡眠を断定しません。
 
 ## 構成
 
@@ -59,9 +59,9 @@ BLE利用時は `--no-ble` を外し、MacのBluetoothとターミナルのBluet
 
 ## 研究・互換性
 
-- 状態：Micro（5分→最大1時間）・Meso（日）・Macro（固定週＋過去4週）のLSTM。現在/日全体の5尺度と補助活動分類。
+- 状態：Micro（5分→最大1時間）・Meso（日）・Macro（固定週＋過去4週）のLSTM。現在/日全体の5尺度を推定します。固定24活動の補助分類、回答履歴による条件付け、暫定baselineからの項目別配信切替は、既定の `research_architecture=legacy` の仕様です。Discoveryでは活動回答を事後注釈に用い、共有モデルからPlace・Behavior・尺度を推定します。
 - 質問：既定4件は current 1、night 1、weather 1、place/task日替わり1。条件・観測不足では4件未満です。イベント起点の追加提案は上限を明示的に5以上へ増やした場合に使います。
-- 評価：**イベントごとのオンライン個人化（2=B）**。対象予測より前に受信済みの同日回答を利用できます。日単位凍結評価と混ぜません。
+- 評価：Legacyの `personalize` は**イベントごとのオンライン個人化（2=B）**。対象予測より前に受信済みの同日回答を利用できます。日単位凍結評価と混ぜません。
 - 復元：**推論checkpointと同条件での再学習（10=A）**。optimizer/RNG途中状態の厳密resumeはありません。
 - 特徴をv2へ更新したため旧v1 checkpointは `incompatible_checkpoint`。元ファイルとDBは削除せず、承認した環境で再学習・評価して切り替えます。既存の旧保存パスは引き続き探索します。
 

@@ -54,13 +54,15 @@ SentenceTransformerの重みを指定しただけで既存LSTM重みを使い回
 推論は `local_files_only=True, trust_remote_code=False` で行い、確定文章を外部APIに送らない。
 前後contextや自己報告の自由文を文章入力に混ぜない。iOSの既存commit形式は変更しない。
 
-## 状態マップ
+## 従来方式のGrowingMap
 
-中心は観測座標ごとの逐次平均で更新する。近傍学習率による更新は使わない。
+以下は `research_architecture=legacy` の仕様。中心は観測座標ごとの逐次平均で更新する。近傍学習率による更新は使わない。
 保存される辺は自己遷移を除き、時刻差0〜12時間の状態変更回数だけである。
 構成比は `Q_ab = N_ab / sum(c != a, N_ac)`、分母0では未定義とする。
 A,A,A,BならA→Bの回数は1、構成比は1。滞在を含む次観測の予測確率ではない。
 APIの `edges[].count` は引き続き回数であり、構成比フィールドを追加したものではない。
+
+DiscoveryMapはこの座標別平均・12時間条件を使わず、正規化埋め込みのプロトタイプと、時刻差が0より大きく1時間以内の状態変更辺を用いる。
 
 モデル出典：[モデルカード](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2)、
 [SentenceTransformer API](https://sbert.net/docs/package_reference/sentence_transformer/model.html)。
