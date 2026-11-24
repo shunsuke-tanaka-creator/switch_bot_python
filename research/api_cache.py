@@ -152,8 +152,13 @@ class ResearchCache:
             return previous
 
     def records(self, participant, kinds=None):
+        return self.record_views(participant, (kinds,))[0]
+
+    # 追加: 履歴とキー用のviewを同じsnapshotからまとめて取得する。
+    def record_views(self, participant, kind_sets):
         with self.lock:
-            return self._source(participant).view(kinds)
+            source = self._source(participant)
+            return tuple(source.view(kinds) for kinds in kind_sets)
 
     def newest(self, participant):
         """Group ordering may depend on a heartbeat even if graph data does not."""

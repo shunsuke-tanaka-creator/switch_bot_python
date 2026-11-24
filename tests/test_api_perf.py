@@ -201,3 +201,53 @@ def test_context_expiry_and_model_status_changes_remain_live(api, monkeypatch):
     assert client.get("/api/research/p001/context").json()["training"] == {
         "status": "trained", "marker": "changed",
     }
+
+
+# 追加: 履歴snapshot取得直後の回答編集で、旧結果が新しいキーに保存されないことを検証する。
+@pytest.mark.parametrize("mode", ["real", "sample", "combined"])
+def test_answer_edit_after_snapshot_does_not_poison_insight_cache(api, mode, monkeypatch):
+    client, engine, store = api
+    owner = "p001" if mode == "real" else "p001-sample"
+    monkeypatch.setattr(engine, "infer", lambda *args: None)
+    trends = Mock(side_effect=lambda rows, at, **kwargs: dict(
+        fatigue=sum(json.loads(r["payload"]["answer"]["free_text"])["fatigue"]
+                    for r in rows if r["kind"] == "narrative"),
+    ))
+    monkeypatch.setattr(
+        "research.insights.weekday_trends" if engine.architecture == "legacy"
+        else "research.baseline.weekday_trends", trends,
+    )
+    path = f"/api/research/p001/insights?data_mode={mode}"
+    before = client.get(path).json()
+    payload = next(r["payload"] for r in store.rows(owner)
+                   if r["kind"] == "narrative" and r["id"] == "a-1")
+    payload["answer"]["free_text"] = json.dumps(dict.fromkeys(SCALES, 5))
+    original = engine.api_cache._source
+    edited = False
+
+    def edit_after_snapshot(participant):
+        nonlocal edited
+        source = original(participant)
+        if participant == owner and not edited:
+            edited = True
+            with store.lock, store.db:
+                store.db.execute(
+                    "UPDATE records SET payload=? WHERE participant=? AND kind='narrative' AND id='a-1'",
+                    (json.dumps(payload), owner),
+                )
+        return source
+
+    monkeypatch.setattr(engine.api_cache, "_source", edit_after_snapshot)
+    during = client.get(path).json()
+    after = client.get(path).json()
+    assert edited
+    if mode == "combined" and engine.architecture == "legacy":
+        before, during, after = (result["by_source"][owner]
+                                 for result in (before, during, after))
+    assert during["baseline"] == before["baseline"]
+    assert during["trends"] == before["trends"]
+    assert after["baseline"] != before["baseline"]
+    assert after["trends"] != before["trends"]
+    calls = trends.call_count
+    client.get(path)
+    assert trends.call_count == calls
