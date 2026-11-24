@@ -4,8 +4,9 @@ Measured values and assumptions have separate fields. The scale means/SDs descri
 condition-weighted daily baselines with an SD floor of 0.5; they do not identify
 the raw answer marginals. Smoothed aggregate value counts take precedence when
 available; otherwise the generator assumes a maximum-entropy distribution with
-the supplied bounded moments. The validation report includes the actual production
-seven-day conditional baseline as well as raw answer distributions.
+the supplied bounded moments. The validation report uses the shared production
+conditional aggregator with an explicit seven-day lookback for the aggregate
+brief, as well as raw answer distributions. The usual default lookback is 56 days.
 
 Run from the repository root in the normal server/ML Python environment:
 
@@ -54,14 +55,25 @@ training start plus at least one display item: one daily reflection/day makes
 daily train ≥10 impossible in seven days. Additional scenarios are `boundary`
 (more missing days), `low-steps` and `shuffled-labels` (weak-signal control).
 
-Combined training builds each example, sensor history and personal baseline
-inside its source participant's timeline, then pools examples for fitting.
+Combined training builds each example and sensor history inside its source
+participant's timeline, then pools examples for fitting. Legacy also builds
+personal conditioning baselines per source.
 Reports contain per-source support and validation metrics. Combined inference
 uses one source's history, preferring fresh real observations, and exposes that
-sensor source. Combined support is synthetic preview support.
+sensor source. Combined support is synthetic preview support in Legacy.
+Discovery does not calculate new support candidates or deliver new support
+questions from combined histories.
 The overview answers and PMTT nodes carry source identity, and the model panel
-shows train/validation support by source. Combined insight snapshots are computed
-per source before selecting the displayed source.
+shows train/validation support by source. In both Legacy and Discovery, combined
+insights compute conditional baselines, weekday trends and typing windows inside
+each source participant's history. They use the same sensor-freshness selection
+as inference to choose the displayed source and return `sensor_source` for
+attribution. Legacy computes the full snapshot per source and also returns
+`by_source`; Discovery separates these three aggregate calculations while
+retaining the combined model's pattern map. Fresh real observations are preferred;
+otherwise the source with the latest available sensor observation is selected.
+Real and sample answers and typing windows are not pooled into the displayed
+source's trends.
 
 Typing events target the production topology features: `log1p(inserts)/8`,
 deletion-burst/insertion rate divided by two, and the fraction of insertion

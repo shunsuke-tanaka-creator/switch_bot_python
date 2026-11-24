@@ -14,6 +14,8 @@
 | X01 | 全入力モードのcommit契約、英語候補replacesの重複除外 |
 | GPS/構成 | GPS地図/行き先処理を削除。Store/BLE/inferenceを小さく分離。従来CLI/importは維持 |
 
+S04/S11の「0〜4時night」は旧条件の記録です。現行サーバーのnight枠は22:00〜23:59であり、0〜4時には発行しません。
+
 削除判断が不十分な外部公開APIやモデルheadは一律削除していません。旧サンプルCLIは処理を停止して新generatorを案内する互換入口とし、危険な旧DB直接書込をなくしました。チェックポイントのparameter keyを変える最適化は実測後の課題です。
 
 2026-11-12追検証：承認後に専用venvへ収集・ML・テスト依存を導入。CPUで88テスト（軽量15件を含む）が成功しました。合成データによる短い学習、held-out評価、オンライン個人化、Checkpoint保存・復元、APIを含みます。追加したローカル文章モデルの保存・再読み込み・移動・キャッシュ失効も成功しました（外部重み取得なし）。Python AST、JSON/YAML、シェル構文、両repoの共通fixture照合、diff確認も実施。PRごとのCPU CIを追加し、[GitHub Actions](https://github.com/shunsuke-tanaka-creator/switch_bot_python/actions/runs/43191910241)（Ubuntu 24.04 / Python 3.12.16）でも88件成功しました。ActionはNode 24対応版のcommitへ固定しています。
